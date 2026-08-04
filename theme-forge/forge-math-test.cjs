@@ -101,5 +101,29 @@ const themeD = synthesize([mk(255, 224, 196, 5000), teal, deepBlue], { name: 'x'
 const bgD = themeD.darkColors.background
 check('slot1-ctrl: dark bg from bright seed still dark', luminance(bgD) < 0.2, luminance(bgD).toFixed(3))
 
+// ── Slot-2 foreground control (regression: was always luminance-extreme derived) ──
+// Use distinct swatches so hue swaps are observable.
+const softPink = mk(230, 150, 160, 1200)
+const skyBlue = mk(120, 180, 255, 1100)
+const slot2Base = [teal, softPink, skyBlue, mk(255, 120, 50, 3000), mk(120, 30, 80, 2000)]
+const themeFG1 = synthesize(slot2Base, { name: 'x', label: 'x', mode: 'dark' })
+const themeFG2 = synthesize([...slot2Base.slice(0, 1), skyBlue, softPink, ...slot2Base.slice(3)], { name: 'x', label: 'x', mode: 'dark' })
+check('slot2-ctrl: swapping slot 2 changes dark fg hue', hueDist(rgbToHsl(...hexToRgb(themeFG1.darkColors.foreground)).h, rgbToHsl(...hexToRgb(themeFG2.darkColors.foreground)).h) > 15, `fg1=${themeFG1.darkColors.foreground} fg2=${themeFG2.darkColors.foreground}`)
+check('slot2-ctrl: light swap changes light fg hue', hueDist(rgbToHsl(...hexToRgb(themeFG1.colors.foreground)).h, rgbToHsl(...hexToRgb(themeFG2.colors.foreground)).h) > 15, `fg1=${themeFG1.colors.foreground} fg2=${themeFG2.colors.foreground}`)
+check('slot2-ctrl: dark fg contrast >= 7 on bg', contrast(themeFG1.darkColors.foreground, themeFG1.darkColors.background) >= 7, contrast(themeFG1.darkColors.foreground, themeFG1.darkColors.background).toFixed(2))
+check('slot2-ctrl: light fg contrast >= 7 on bg', contrast(themeFG1.colors.foreground, themeFG1.colors.background) >= 7, contrast(themeFG1.colors.foreground, themeFG1.colors.background).toFixed(2))
+
+// Light seed in dark-mode slot 2: foreground should follow that hue/character,
+// but must stay usable — no collapse to pure white.
+const lightSeedFG = mk(240, 235, 220, 4000)
+const themeLightSeed = synthesize([deepBlue, lightSeedFG, skyBlue], { name: 'x', label: 'x', mode: 'dark' })
+const lightSeedFGResult = themeLightSeed.darkColors.foreground
+check('slot2-ctrl: light seed fg does not collapse to white', lightSeedFGResult.toLowerCase() !== '#ffffff', lightSeedFGResult)
+check('slot2-ctrl: light seed fg still passes contrast', contrast(lightSeedFGResult, themeLightSeed.darkColors.background) >= 7, contrast(lightSeedFGResult, themeLightSeed.darkColors.background).toFixed(2))
+
+// Single-swatch fallback preserves prior behavior when slot 2 is absent.
+const themeSingle = synthesize([softPink], { name: 'x', label: 'x', mode: 'dark' })
+check('slot2-ctrl: single swatch still derives fg', typeof themeSingle.darkColors.foreground === 'string' && contrast(themeSingle.darkColors.foreground, themeSingle.darkColors.background) >= 7, themeSingle.darkColors.foreground)
+
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} FAILURES`)
 process.exit(failures ? 1 : 0)

@@ -269,15 +269,28 @@ function buildColorsFromPalette(ordered, wantDark) {
     background = mix(seed.hex, '#ffffff', t)
   }
 
-  // Foreground: luminance extreme of the REMAINING swatches (derived neutral —
-  // nobody hand-manages text color), contrast-guaranteed below.
+  // Foreground: slot 2 IS the foreground hue seed when present.
+  // Its lightness is enforced toward a usable value, then contrast-guaranteed below.
   let foreground
-  if (wantDark) {
-    foreground = (byLum[byLum.length - 1] || seed).hex
-    if (luminance(foreground) < 0.55) foreground = mix(foreground, '#ffffff', 0.75)
+  if (ordered.length >= 2) {
+    foreground = ordered[1].hex
+    if (wantDark) {
+      let t = 0.5
+      while (t <= 1.001 && luminance(mix(foreground, '#ffffff', t)) < 0.55) t += 0.05
+      foreground = mix(foreground, '#ffffff', Math.min(t, 1))
+    } else {
+      let t = 0.5
+      while (t <= 1.001 && luminance(mix(foreground, '#060608', t)) > 0.35) t += 0.05
+      foreground = mix(foreground, '#060608', Math.min(t, 1))
+    }
   } else {
-    foreground = (byLum[0] || seed).hex
-    if (luminance(foreground) > 0.35) foreground = mix(foreground, '#060608', 0.7)
+    if (wantDark) {
+      foreground = (byLum[byLum.length - 1] || seed).hex
+      if (luminance(foreground) < 0.55) foreground = mix(foreground, '#ffffff', 0.75)
+    } else {
+      foreground = (byLum[0] || seed).hex
+      if (luminance(foreground) > 0.35) foreground = mix(foreground, '#060608', 0.7)
+    }
   }
 
   const accentSafe = ensureContrast(accentRaw.hex, background, wantDark ? 3.2 : 3)
@@ -563,7 +576,7 @@ function SwatchTray({ entry }) {
     children: [
       jsx('div', {
         className: 'text-[0.625rem] text-(--ui-text-quaternary)',
-        children: pickedHere !== null ? 'picked up — click a slot to place (click again to cancel)' : 'swatch 1 = background hue · tap to pick up, tap to place'
+        children: pickedHere !== null ? 'picked up — click a slot to place (click again to cancel)' : 'swatch 1 = background hue · swatch 2 = text · tap to pick up, tap to place'
       }),
       jsx('div', {
         className: 'flex flex-wrap gap-1.5',
