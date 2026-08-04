@@ -942,7 +942,7 @@ function ColorWheelPanel({ value, onChange, onCommit, onCancel }) {
   })
 }
 
-function ThemeCardActual({ entry }) {
+function ThemeCard({ entry }) {
   const expanded = useValue($expanded) === entry.name
   const editing = useValue($editing) === entry.name
   const mode = useValue($mode)
