@@ -409,6 +409,17 @@ function deriveSwatches(theme) {
   return out
 }
 
+/**
+ * The plugin used to auto-prepend 'Forge · ' to every theme label. Sleek
+ * mode: strip ONLY that exact auto-injected prefix. Names that carry 'Forge'
+ * as part of the actual name ('Dark Forge', 'Forge Midnight') are untouched.
+ * Falls back to the original if stripping would empty the label.
+ */
+const stripForgePrefix = label => {
+  const raw = String(label || '')
+  return raw.replace(/^\s*forge\s*[·•]\s*/i, '').trim() || raw
+}
+
 // ── persistence + registration ──────────────────────────────────────────────
 
 let storageRef = null
@@ -476,10 +487,10 @@ async function forgeTheme(file, mode) {
 
     return {
       name: themeName,
-      label: `Forge · ${label}`,
+      label,
       mode,
       swatches: ordered,
-      theme: synthesize(ordered, { name: themeName, label: `Forge · ${label}`, mode }),
+      theme: synthesize(ordered, { name: themeName, label, mode }),
       source: thumbOf(img),
       forgedAt: Date.now()
     }
@@ -594,7 +605,7 @@ function StripRow({ entry, onOpen }) {
               el.scrollLeft += ev.deltaY
             }
           },
-          className: 'relative flex flex-nowrap overflow-x-auto overflow-y-visible',
+          className: 'relative flex overflow-x-auto overflow-y-visible',
           style: { scrollbarWidth: 'none', scrollSnapType: 'x proximity' },
           children: [
             ...swatches.slice(0, 8).map((s, i) =>
@@ -626,7 +637,7 @@ function StripRow({ entry, onOpen }) {
  *  theme's own tokens for v1-era entries (no source persisted). */
 function ThemeThumb({ entry }) {
   if (entry.source) {
-    return jsx('img', { src: entry.source, alt: '', className: 'h-9 w-9 rounded-[3px] object-cover' })
+    return jsx('img', { src: entry.source, alt: '', className: 'h-5 w-5 shrink-0 rounded-[2px] object-cover' })
   }
   const c = entry.theme?.darkColors || entry.theme?.colors || {}
   const t = entry.theme?.darkTerminal || entry.theme?.terminal || {}
@@ -634,7 +645,7 @@ function ThemeThumb({ entry }) {
   const p1 = c.primary || '#888888'
   const p2 = t.cyan || t.green || p1
   return jsx('div', {
-    className: 'h-9 w-9 rounded-[3px]',
+    className: 'h-5 w-5 shrink-0 rounded-[3px]',
     title: 'Theme colors (no source image kept)',
     style: {
       background: `linear-gradient(135deg, ${bg} 0%, ${bg} 40%, ${p1} 40%, ${p1} 70%, ${p2} 70%)`,
@@ -658,8 +669,8 @@ function TermPreview({ theme, mode }) {
     )
 
   return jsx('div', {
-    className: 'rounded-[6px] p-2 font-mono text-[0.6875rem] leading-relaxed shadow-[inset_0_0_0_1px_rgba(128,128,128,0.25)]',
-    style: { background: bg, color: fg },
+    className: 'overflow-x-auto rounded-[6px] p-2 font-mono text-[0.6875rem] leading-relaxed',
+    style: { background: bg, color: fg, boxShadow: 'inset 0 0 0 1px rgba(128,128,128,0.25)' },
     children: [
       line([['➜ ', t.green], ['~/farmfriend ', t.cyan], ['git status', fg]], 'l1'),
       line([['On branch ', fg], ['main', t.magenta]], 'l2'),
@@ -755,7 +766,7 @@ function SwatchTray({ entry }) {
             el.scrollLeft += ev.deltaY
           }
         },
-        className: 'relative flex flex-nowrap gap-1.5 overflow-x-auto overflow-y-visible',
+        className: 'relative flex gap-1.5 overflow-x-auto overflow-y-visible',
         style: { scrollbarWidth: 'none', scrollSnapType: 'x proximity' },
         children: swatches.map((s, i) =>
           jsx(
@@ -795,13 +806,19 @@ function SwatchTray({ entry }) {
                 dragIdx.current = null
                 setOver(null)
               },
-              className: cn(
-                'flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-[5px] text-xs font-bold transition-transform',
-                'shadow-[inset_0_0_0_1px_rgba(128,128,128,0.45)] hover:scale-105',
-                pickedHere === i && 'scale-110 shadow-[0_0_0_2px_var(--ui-accent)]',
-                over === i && 'scale-110 shadow-[0_0_0_2px_var(--ui-accent)]'
-              ),
-              style: { background: s.hex, color: readableOn(s.hex), outline: pickedHere === i ? '2px solid var(--ui-accent)' : 'none', scrollSnapAlign: 'start' },
+              className: 'flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-[5px] text-xs font-bold',
+              style: {
+                background: s.hex,
+                color: readableOn(s.hex),
+                // ring/scale inline: arbitrary shadow-[…] and scale-* are not
+                // in the app's frozen build CSS
+                boxShadow:
+                  'inset 0 0 0 1px rgba(128,128,128,0.45)' +
+                  (pickedHere === i || over === i ? ', 0 0 0 2px var(--ui-accent)' : ''),
+                transform: pickedHere === i || over === i ? 'scale(1.08)' : 'none',
+                transition: 'transform 0.1s ease',
+                scrollSnapAlign: 'start'
+              },
               children: i + 1
             },
             `sw-${i}`
@@ -878,18 +895,24 @@ function ColorWheelPanel({ value, onChange, onCommit, onCancel }) {
   }
 
   return jsxs('div', {
-    className: 'flex items-center gap-2 rounded-[6px] border border-(--ui-stroke-secondary) p-2',
-    style: { background: 'var(--chrome-action-hover)', height: 170 },
+    // flex-wrap: when the pane is too narrow for wheel + controls
+    // side-by-side, the controls column wraps below the wheel instead of
+    // clipping. min() / vw arbitrary classes are NOT in the app's frozen
+    // build CSS, so the wheel size lives inline.
+    className: 'flex min-w-0 flex-wrap items-stretch gap-2 overflow-hidden rounded-[6px] border border-(--ui-stroke-secondary) p-2',
+    style: { background: 'var(--chrome-action-hover)' },
     children: [
       jsx('div', {
+        className: 'relative shrink-0 cursor-crosshair select-none overflow-hidden rounded-full',
         ref: wheelRef,
         onPointerDown: onWheelPointerDown,
         onPointerMove: onWheelPointerMove,
         onPointerUp: onWheelPointerUp,
         onPointerCancel: onWheelPointerUp,
         title: 'angle = hue · radius = saturation',
-        className: 'relative h-[140px] w-[140px] shrink-0 cursor-crosshair select-none rounded-full',
         style: {
+          width: 128,
+          height: 128,
           background:
             `conic-gradient(from 0deg, hsl(0,100%,50%), hsl(60,100%,50%), hsl(120,100%,50%), hsl(180,100%,50%), hsl(240,100%,50%), hsl(300,100%,50%), hsl(360,100%,50%)),` +
             `radial-gradient(farthest-corner, #fff 0%, rgba(255,255,255,0) 58%, rgba(0,0,0,0.45) 100%)`,
@@ -897,10 +920,14 @@ function ColorWheelPanel({ value, onChange, onCommit, onCancel }) {
         },
         children: [
           jsx('div', {
-            className: 'pointer-events-none absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/70 shadow-[0_0_0_1px_rgba(0,0,0,0.45)]',
+            // border/shadow inline: arbitrary shadow-[…] and border-white/70
+            // are not in the app's frozen build CSS.
+            className: 'pointer-events-none absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full',
             style: {
-              transform: `translate(calc(-50% + ${Math.cos(h * 2 * Math.PI) * s * 54}px), calc(-50% + ${Math.sin(h * 2 * Math.PI) * s * 54}px))`,
-              background: live
+              transform: `translate(calc(-50% + ${Math.cos(h * 2 * Math.PI) * s * 56}px), calc(-50% + ${Math.sin(h * 2 * Math.PI) * s * 56}px))`,
+              background: live,
+              border: '1px solid rgba(255,255,255,0.7)',
+              boxShadow: '0 0 0 1px rgba(0,0,0,0.45)'
             }
           }),
           jsx('div', {
@@ -909,11 +936,11 @@ function ColorWheelPanel({ value, onChange, onCommit, onCancel }) {
           })
         ]
       }),
-      jsxs('div', { className: 'flex min-w-0 flex-col gap-2', children: [
+      jsxs('div', { className: 'flex min-w-0 flex-col gap-2', style: { flex: '1 1 100px' }, children: [
         jsxs('div', { className: 'flex items-center gap-2', children: [
           jsx('div', {
-            className: 'h-8 w-8 shrink-0 rounded-[4px] shadow-[inset_0_0_0_1px_rgba(128,128,128,0.45)]',
-            style: { background: live }
+            className: 'h-8 w-8 shrink-0 rounded-[4px]',
+            style: { background: live, boxShadow: 'inset 0 0 0 1px rgba(128,128,128,0.45)' }
           }),
           jsxs('div', { className: 'min-w-0', children: [
             jsx('div', { className: 'truncate text-xs font-medium text-(--ui-text-primary)', children: live.toUpperCase() }),
@@ -929,8 +956,8 @@ function ColorWheelPanel({ value, onChange, onCommit, onCancel }) {
             step: 0.005,
             value: l,
             onChange: ev => setL(Number(ev.target.value)),
-            className: 'h-1 w-full accent-(--ui-accent)',
-            style: { background: `linear-gradient(to right, #000, ${live})`, borderRadius: 999 }
+            className: 'h-1 w-full',
+            style: { background: `linear-gradient(to right, #000, ${live})`, borderRadius: 999, accentColor: 'var(--ui-accent)' }
           })
         ] }),
         jsxs('div', { className: 'flex items-center gap-1.5', children: [
@@ -949,13 +976,13 @@ function ThemeCard({ entry }) {
   const [draft, setDraft] = useState(entry.label)
 
   useEffect(() => {
-    if (editing) setDraft(entry.label.replace(/^Forge · /, ''))
+    if (editing) setDraft(stripForgePrefix(entry.label))
   }, [editing])
 
   const commitRename = () => {
     const clean = draft.trim()
     if (clean) {
-      const label = `Forge · ${clean}`
+      const label = clean
       const theme = { ...entry.theme, label }
       updateTheme(entry.name, { label, theme })
       host.notify({ kind: 'success', message: `Renamed to "${label}".` })
@@ -964,11 +991,12 @@ function ThemeCard({ entry }) {
   }
 
   return jsxs('div', {
-    className: 'flex flex-col gap-1.5 rounded-[6px] p-2 shadow-[inset_0_0_0_1px_var(--ui-stroke-secondary)]',
+    className: 'flex flex-col gap-1.5 rounded-[6px] p-2',
+    style: { boxShadow: 'inset 0 0 0 1px var(--ui-stroke-secondary)' },
     children: [
       // header row
       jsxs('div', {
-        className: 'flex items-center gap-1.5',
+        className: 'flex min-w-0 flex-wrap items-center gap-1',
         children: [
           jsx(ThemeThumb, { entry }),
           editing
@@ -985,51 +1013,28 @@ function ThemeCard({ entry }) {
                 }),
                 jsx(Button, { variant: 'ghost', size: 'icon-xs', onClick: commitRename, children: jsx(icons.Check, {}) })
               ] })
-            : jsx('button', {
-                type: 'button',
-                title: 'Rename',
-                onClick: () => $editing.set(entry.name),
-                className: 'min-w-0 flex-1 truncate text-left text-xs font-medium text-(--ui-text-primary) hover:underline',
-                children: entry.label
-              }),
-          jsx(Button, {
-            variant: 'ghost',
-            size: 'icon-xs',
-            title: 'Rename theme',
-            onClick: () => $editing.set(entry.name),
-            children: jsx(icons.Pencil, {})
-          }),
-          jsx(Button, {
-            variant: 'ghost',
-            size: 'icon-xs',
-            title: expanded ? 'Hide terminal preview' : 'Terminal preview',
-            onClick: () => $expanded.set(expanded ? null : entry.name),
-            children: jsx(icons.Terminal, {})
-          }),
-          jsx(Button, {
-            variant: 'ghost',
-            size: 'icon-xs',
-            title: 'Reforge from source image',
-            onClick: () => reforge(entry),
-            children: jsx(icons.RefreshCw, {})
-          }),
-          jsx(Button, {
-            variant: 'ghost',
-            size: 'icon-xs',
-            title: 'Delete theme',
-            onClick: () => {
+            : jsxs('div', { className: 'min-w-0 flex-1 truncate', children: [
+                jsx('button', {
+                  type: 'button',
+                  title: 'Rename',
+                  onClick: () => $editing.set(entry.name),
+                  className: 'min-w-0 truncate text-left text-xs font-medium text-(--ui-text-primary) hover:underline',
+                  children: entry.label
+                })
+              ] }),
+          jsxs('div', { className: 'flex shrink-0 items-center gap-0.5', children: [
+            jsx(Button, { variant: 'ghost', size: 'icon-xs', title: 'Rename theme', onClick: () => $editing.set(entry.name), children: jsx(icons.Pencil, {}) }),
+            jsx(Button, { variant: 'ghost', size: 'icon-xs', title: expanded ? 'Hide terminal preview' : 'Terminal preview', onClick: () => $expanded.set(expanded ? null : entry.name), children: jsx(icons.Terminal, {}) }),
+            jsx(Button, { variant: 'ghost', size: 'icon-xs', title: 'Reforge from source image', onClick: () => reforge(entry), children: jsx(icons.RefreshCw, {}) }),
+            jsx(Button, { variant: 'ghost', size: 'icon-xs', title: 'Delete theme', onClick: () => {
               const list = (storageRef ? storageRef.get('themes', []) : []).filter(t => t.name !== entry.name)
               saveThemes(list)
               const d = disposersBySlug.get(entry.name)
-              if (d) {
-                d()
-                disposersBySlug.delete(entry.name)
-              }
+              if (d) { d(); disposersBySlug.delete(entry.name) }
               haptic('tap')
               host.notify({ kind: 'info', message: `Removed "${entry.label}".` })
-            },
-            children: jsx(icons.Trash2, {})
-          })
+            }, children: jsx(icons.Trash2, {}) })
+          ] })
         ]
       }),
 
@@ -1080,11 +1085,12 @@ function ForgePane() {
     onDrop,
     children: [
       jsxs('div', {
-        className: 'flex items-center justify-between gap-2',
+        className: 'flex min-w-0 flex-wrap items-center justify-between gap-2',
         children: [
           jsx('div', { className: 'min-w-0 truncate font-medium text-(--ui-text-primary)', children: 'Theme Forge' }),
-          jsxs('div', { className: 'flex shrink-0 items-center gap-1', children: [
-            jsx('div', { className: 'w-[100px]', children: jsx(SegmentedControl, {
+          jsxs('div', { className: 'flex min-w-0 items-center gap-1', children: [
+            jsx('div', { className: 'min-w-0', children: jsx(SegmentedControl, {
+              className: 'max-w-full',
               options: [
                 { id: 'cards', label: 'Cards' },
                 { id: 'strip', label: 'Strip' }
@@ -1092,7 +1098,8 @@ function ForgePane() {
               value: viewMode,
               onChange: v => setViewMode(v)
             }) }),
-            jsx('div', { className: 'w-[80px]', children: jsx(SegmentedControl, {
+            jsx('div', { className: 'min-w-0', children: jsx(SegmentedControl, {
+              className: 'max-w-full',
               options: [
                 { id: 'dark', label: 'Dark' },
                 { id: 'light', label: 'Light' }
@@ -1106,7 +1113,7 @@ function ForgePane() {
 
       jsxs('label', {
         className: cn(
-          'flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-[6px] border border-dashed p-4 text-center transition-colors',
+          'flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-[6px] border border-dashed p-3 text-center transition-colors',
           'border-(--ui-stroke-secondary) hover:bg-(--chrome-action-hover)'
         ),
         children: [
@@ -1118,16 +1125,16 @@ function ForgePane() {
       }),
 
       jsxs('div', {
-        className: 'flex min-h-0 flex-1 flex-col gap-1.5',
+        className: 'flex min-h-0 flex-1 flex-col gap-1.5 overflow-hidden',
         children: [
           jsx('div', {
-            className: 'text-[0.6875rem] font-medium uppercase tracking-wide text-(--ui-text-tertiary)',
+            className: 'min-w-0 text-[0.6875rem] font-medium uppercase tracking-wide text-(--ui-text-tertiary)',
             children: `Forged themes (${generated.length})`
           }),
           jsx(ScrollArea, {
             className: 'min-h-0 flex-1',
             children: jsx('div', {
-              className: viewMode === 'strip' ? 'flex flex-col gap-px' : 'flex flex-col gap-2 pb-2',
+              className: viewMode === 'strip' ? 'flex min-w-0 flex-col gap-px' : 'flex min-w-0 flex-col gap-2 pb-2',
               children: generated.length
                 ? generated.map(entry =>
                     viewMode === 'strip'
@@ -1156,12 +1163,19 @@ export default {
     registerRef = ctx.register
 
     // One-time schema migration: v1 stored raw theme objects; v2 stores
-    // { name, label, mode, swatches, theme, source } entries.
-    const migrated = ctx.storage.get('themes', []).map(e =>
-      e && !e.theme && e.colors
-        ? { name: e.name, label: e.label, mode: 'dark', swatches: [], theme: e, source: null, forgedAt: Date.now() }
-        : e
-    )
+    // { name, label, mode, swatches, theme, source } entries. v3 (sleek
+    // naming) strips the auto-injected 'Forge · ' prefix from both the
+    // card label and the registered theme label, so names show clean —
+    // including legacy data persisted before this change.
+    const migrated = ctx.storage.get('themes', []).map(e => {
+      const base =
+        e && !e.theme && e.colors
+          ? { name: e.name, label: e.label, mode: 'dark', swatches: [], theme: e, source: null, forgedAt: Date.now() }
+          : e
+      if (!base || !base.theme) return base
+      const label = stripForgePrefix(base.label ?? base.theme.label)
+      return { ...base, label, theme: { ...base.theme, label } }
+    })
     ctx.storage.set('themes', migrated)
 
     // Re-register every persisted theme so they survive restarts.
@@ -1176,7 +1190,7 @@ export default {
       id: 'pane',
       area: 'panes',
       title: 'theme forge',
-      data: { placement: 'right', width: '270px' },
+      data: { placement: 'right', width: '280px', minWidth: '220px', maxWidth: '520px' },
       render: () => jsx(ForgePane, {})
     })
 

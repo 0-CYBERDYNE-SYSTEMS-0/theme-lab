@@ -12,8 +12,8 @@ const end = src.indexOf('// ── forge pipeline')
 let core = src.slice(start, end)
 
 // eval in this scope — wrap so const bindings come back out
-const api = new Function(core + '; return {rgbToHex, hexToRgb, rgbToHsl, hslToRgb, hexToHsl, hslToHex, buildColorsFromPalette, ansiPalette, synthesize, deriveSwatches, contrast, luminance, mix, readableOn, ensureContrast}')()
-const { rgbToHex, hexToRgb, rgbToHsl, hslToRgb, hexToHsl, hslToHex, buildColorsFromPalette, ansiPalette, synthesize, deriveSwatches, contrast, luminance, mix, readableOn, ensureContrast } = api
+const api = new Function(core + '; return {rgbToHex, hexToRgb, rgbToHsl, hslToRgb, hexToHsl, hslToHex, buildColorsFromPalette, ansiPalette, synthesize, deriveSwatches, contrast, luminance, mix, readableOn, ensureContrast, stripForgePrefix}')()
+const { rgbToHex, hexToRgb, rgbToHsl, hslToRgb, hexToHsl, hslToHex, buildColorsFromPalette, ansiPalette, synthesize, deriveSwatches, contrast, luminance, mix, readableOn, ensureContrast, stripForgePrefix } = api
 
 // Simulate palette output of extractPalette for our test image blocks
 const mk = (r, g, b, w) => ({ hex: rgbToHex(r, g, b), hsl: rgbToHsl(r, g, b), weight: w })
@@ -134,9 +134,6 @@ check('slot2-ctrl: light seed fg still passes contrast', contrast(lightSeedFGRes
 const themeSingle = synthesize([softPink], { name: 'x', label: 'x', mode: 'dark' })
 check('slot2-ctrl: single swatch still derives fg', typeof themeSingle.darkColors.foreground === 'string' && contrast(themeSingle.darkColors.foreground, themeSingle.darkColors.background) >= 7, themeSingle.darkColors.foreground)
 
-console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} FAILURES`)
-process.exit(failures ? 1 : 0)
-
 // ── Plugin behavior probes ────────────────────────────────────────────────
 const pluginPath = process.env.HOME + '/.hermes/desktop-plugins/theme-forge/plugin.js'
 const pluginSrc = fs.readFileSync(pluginPath, 'utf8')
@@ -156,3 +153,16 @@ const stripRowExists = /function StripRow\(/.test(pluginSrc)
 check('ui: StripRow component exists', stripRowExists)
 const stripEntrypoint = pluginSrc.includes('StripRow')
 check('ui: strip mode renders StripRow', stripEntrypoint)
+
+// ── Sleek naming: no auto 'Forge · ' branding ───────────────────────────
+check('naming: stripForgePrefix removes auto prefix', stripForgePrefix('Forge · Sunset') === 'Sunset', stripForgePrefix('Forge · Sunset'))
+check('naming: stripForgePrefix is case/separator tolerant', stripForgePrefix('forge•  Aurora') === 'Aurora', stripForgePrefix('forge•  Aurora'))
+check('naming: intentional Forge names preserved', stripForgePrefix('Dark Forge') === 'Dark Forge' && stripForgePrefix('Forge Midnight') === 'Forge Midnight')
+check('naming: empty-result fallback keeps original', stripForgePrefix('Forge · ') === 'Forge · ')
+check('naming: forgeTheme no longer injects prefix', !pluginSrc.includes('label: `Forge ·') && !pluginSrc.includes('label: `Forge · ${label}`'))
+check('naming: rename commit no longer re-adds prefix', !pluginSrc.includes('const label = `Forge · ${clean}`'))
+check('naming: rename draft seeded via stripForgePrefix', pluginSrc.includes('setDraft(stripForgePrefix(entry.label))'))
+check('naming: v3 migration normalizes persisted labels', pluginSrc.includes('stripForgePrefix(base.label ?? base.theme.label)'))
+
+console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} FAILURES`)
+process.exit(failures ? 1 : 0)
