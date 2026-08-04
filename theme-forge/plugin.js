@@ -319,6 +319,30 @@ function synthesize(ordered, meta) {
   }
 }
 
+/**
+ * Recover a swatch list from a theme's own tokens — for v1-era entries that
+ * never stored their extracted palette. Order follows the tray's semantics:
+ * slot 1 = background seed, rest = accent priority.
+ */
+function deriveSwatches(theme) {
+  const c = theme.darkColors || theme.colors || {}
+  const t = theme.darkTerminal || theme.terminal || {}
+  const candidates = [c.background, c.primary, c.foreground, t.red, t.green, t.blue, t.yellow, t.magenta, t.cyan, c.destructive, c.accent, c.secondary]
+  const seen = new Set()
+  const out = []
+  for (const hex of candidates) {
+    if (typeof hex !== 'string' || !/^#[0-9a-f]{6}$/i.test(hex)) continue
+    const key = hex.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    const rgb = hexToRgb(hex)
+    if (!rgb) continue
+    out.push({ hex, hsl: rgbToHsl(rgb[0], rgb[1], rgb[2]), weight: 1000 - out.length })
+    if (out.length >= 8) break
+  }
+  return out
+}
+
 // ── persistence + registration ──────────────────────────────────────────────
 
 let storageRef = null
@@ -439,6 +463,27 @@ function reforge(entry) {
 
 // ── UI bits ─────────────────────────────────────────────────────────────────
 
+/** Card thumbnail: the kept source image, or a color field built from the
+ *  theme's own tokens for v1-era entries (no source persisted). */
+function ThemeThumb({ entry }) {
+  if (entry.source) {
+    return jsx('img', { src: entry.source, alt: '', className: 'h-9 w-9 rounded-[3px] object-cover' })
+  }
+  const c = entry.theme?.darkColors || entry.theme?.colors || {}
+  const t = entry.theme?.darkTerminal || entry.theme?.terminal || {}
+  const bg = c.background || '#222222'
+  const p1 = c.primary || '#888888'
+  const p2 = t.cyan || t.green || p1
+  return jsx('div', {
+    className: 'h-9 w-9 rounded-[3px]',
+    title: 'Theme colors (no source image kept)',
+    style: {
+      background: `linear-gradient(135deg, ${bg} 0%, ${bg} 40%, ${p1} 40%, ${p1} 70%, ${p2} 70%)`,
+      boxShadow: 'inset 0 0 0 1px rgba(128,128,128,0.35)'
+    }
+  })
+}
+
 function TermPreview({ theme, mode }) {
   // Render a mini terminal using the theme's ANSI palette for the right mode
   const t = mode === 'light' && !theme.darkTerminal ? theme.terminal : mode === 'light' ? theme.terminal : theme.darkTerminal || theme.terminal
@@ -471,9 +516,12 @@ function SwatchTray({ entry }) {
   const dragIdx = useRef(null)
   const [over, setOver] = useState(null)
 
+  // v1-era entries persisted with an empty swatch list — recover from tokens
+  const swatches = entry.swatches && entry.swatches.length > 0 ? entry.swatches : deriveSwatches(entry.theme)
+
   const move = (from, to) => {
     if (from === to) return
-    const sw = [...entry.swatches]
+    const sw = [...swatches]
     const [moved] = sw.splice(from, 1)
     sw.splice(to, 0, moved)
     const theme = synthesize(sw, entry)
@@ -490,7 +538,7 @@ function SwatchTray({ entry }) {
       }),
       jsx('div', {
         className: 'flex flex-wrap gap-1',
-        children: entry.swatches.map((s, i) =>
+        children: swatches.map((s, i) =>
           jsx(
             'div',
             {
@@ -560,7 +608,7 @@ function ThemeCard({ entry }) {
       jsxs('div', {
         className: 'flex items-center gap-1.5',
         children: [
-          entry.source ? jsx('img', { src: entry.source, alt: '', className: 'h-7 w-7 rounded-[3px] object-cover' }) : null,
+          jsx(ThemeThumb, { entry }),
           editing
             ? jsxs('div', { className: 'flex min-w-0 flex-1 items-center gap-1', children: [
                 jsx(Input, {
@@ -582,6 +630,13 @@ function ThemeCard({ entry }) {
                 className: 'min-w-0 flex-1 truncate text-left text-xs font-medium text-(--ui-text-primary) hover:underline',
                 children: entry.label
               }),
+          jsx(Button, {
+            variant: 'ghost',
+            size: 'icon-xs',
+            title: 'Rename theme',
+            onClick: () => $editing.set(entry.name),
+            children: jsx(icons.Pencil, {})
+          }),
           jsx(Button, {
             variant: 'ghost',
             size: 'icon-xs',
@@ -617,7 +672,6 @@ function ThemeCard({ entry }) {
       }),
 
       jsx(SwatchTray, { entry }),
-      expanded ? jsx(TermPreview, { theme: entry.theme, mode: entry.mode || mode }) : null,
 
       jsx(Button, {
         variant: 'secondary',
@@ -627,7 +681,9 @@ function ThemeCard({ entry }) {
           host.notify({ kind: 'info', message: `Click "${entry.label}" in the grid to apply.` })
         },
         children: 'Apply…'
-      })
+      }),
+
+      expanded ? jsx(TermPreview, { theme: entry.theme, mode: entry.mode || mode }) : null
     ]
   })
 }

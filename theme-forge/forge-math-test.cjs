@@ -12,8 +12,8 @@ const end = src.indexOf('// ── forge pipeline')
 let core = src.slice(start, end)
 
 // eval in this scope — wrap so const bindings come back out
-const api = new Function(core + '; return {rgbToHex, rgbToHsl, buildColorsFromPalette, ansiPalette, synthesize, contrast, luminance, mix, readableOn, ensureContrast}')()
-const { rgbToHex, rgbToHsl, buildColorsFromPalette, ansiPalette, synthesize, contrast, luminance, mix, readableOn, ensureContrast } = api
+const api = new Function(core + '; return {rgbToHex, rgbToHsl, buildColorsFromPalette, ansiPalette, synthesize, deriveSwatches, contrast, luminance, mix, readableOn, ensureContrast}')()
+const { rgbToHex, rgbToHsl, buildColorsFromPalette, ansiPalette, synthesize, deriveSwatches, contrast, luminance, mix, readableOn, ensureContrast } = api
 
 // Simulate palette output of extractPalette for our test image blocks
 const mk = (r, g, b, w) => ({ hex: rgbToHex(r, g, b), hsl: rgbToHsl(r, g, b), weight: w })
@@ -59,6 +59,13 @@ check('theme: label carries through', theme.label === 'Forge · test')
 const reordered = [palette[1], ...palette.slice(0, 1), ...palette.slice(2)]
 const t2 = synthesize(reordered, meta)
 check('theme: reorder-safe synthesis', REQUIRED.every(k => typeof t2.colors[k] === 'string') && typeof t2.terminal.red === 'string')
+
+// deriveSwatches: v1-era themes (no stored palette) must recover a usable tray
+const derived = deriveSwatches(theme)
+check('deriveSwatches: 4-8 swatches from tokens', derived.length >= 4 && derived.length <= 8, derived.length + ' swatches')
+check('deriveSwatches: valid hex + hsl', derived.every(s => /^#[0-9a-f]{6}$/i.test(s.hex) && typeof s.hsl.h === 'number'))
+const t3 = synthesize(derived, meta)
+check('deriveSwatches: resynthesis round-trip', REQUIRED.every(k => typeof t3.colors[k] === 'string') && typeof t3.terminal.green === 'string')
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} FAILURES`)
 process.exit(failures ? 1 : 0)
