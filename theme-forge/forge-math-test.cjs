@@ -12,8 +12,8 @@ const end = src.indexOf('// ── forge pipeline')
 let core = src.slice(start, end)
 
 // eval in this scope — wrap so const bindings come back out
-const api = new Function(core + '; return {rgbToHex, hexToRgb, rgbToHsl, buildColorsFromPalette, ansiPalette, synthesize, deriveSwatches, contrast, luminance, mix, readableOn, ensureContrast}')()
-const { rgbToHex, hexToRgb, rgbToHsl, buildColorsFromPalette, ansiPalette, synthesize, deriveSwatches, contrast, luminance, mix, readableOn, ensureContrast } = api
+const api = new Function(core + '; return {rgbToHex, hexToRgb, rgbToHsl, hslToRgb, hexToHsl, hslToHex, buildColorsFromPalette, ansiPalette, synthesize, deriveSwatches, contrast, luminance, mix, readableOn, ensureContrast}')()
+const { rgbToHex, hexToRgb, rgbToHsl, hslToRgb, hexToHsl, hslToHex, buildColorsFromPalette, ansiPalette, synthesize, deriveSwatches, contrast, luminance, mix, readableOn, ensureContrast } = api
 
 // Simulate palette output of extractPalette for our test image blocks
 const mk = (r, g, b, w) => ({ hex: rgbToHex(r, g, b), hsl: rgbToHsl(r, g, b), weight: w })
@@ -67,7 +67,16 @@ check('deriveSwatches: valid hex + hsl', derived.every(s => /^#[0-9a-f]{6}$/i.te
 const t3 = synthesize(derived, meta)
 check('deriveSwatches: resynthesis round-trip', REQUIRED.every(k => typeof t3.colors[k] === 'string') && typeof t3.terminal.green === 'string')
 
-// ── Slot-1 background control (regression: hue sort used to override position) ──
+// ── Wheel HSL↔HEX round-trip ────────────────────────────────────────────
+const wheelColors = [mk(13, 47, 134, 5000), mk(255, 120, 50, 4000), mk(46, 160, 120, 3000), mk(240, 235, 220, 2000)]
+const wheelOk = wheelColors.every(c => {
+  const back = hslToHex(c.hsl.h, c.hsl.s, c.hsl.l)
+  const hsl = hexToHsl(back)
+  return typeof back === 'string' && /^#[0-9a-f]{6}$/i.test(back) && hsl && Math.abs(hsl.h - c.hsl.h) < 0.005 && Math.abs(hsl.s - c.hsl.s) < 0.005 && Math.abs(hsl.l - c.hsl.l) < 0.005
+})
+check('wheel: hsl↔hex round-trip', wheelOk, `${wheelColors.length} sample swatches`)
+
+// ── Slot-1 background control
 const hueDist = (a, b) => {
   const d = Math.abs(a * 360 - b * 360) % 360
   return d > 180 ? 360 - d : d

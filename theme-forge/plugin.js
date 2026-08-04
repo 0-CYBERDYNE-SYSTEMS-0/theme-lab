@@ -40,6 +40,7 @@ const $mode = atom('dark')
 const $expanded = atom(null) // slug with terminal preview open
 const $editing = atom(null) // slug being renamed
 const $picked = atom(null) // { slug, index } — swatch awaiting a new position
+const $wheelOpen = atom(null) // { slug, index } — single inline color editor
 
 // ── color math ──────────────────────────────────────────────────────────────
 
@@ -118,6 +119,38 @@ function rgbToHsl(r, g, b) {
     }
   }
   return { h, s, l }
+}
+
+function hslToRgb(h, s, l) {
+  let r, g, b
+  if (s === 0) {
+    r = g = b = l
+  } else {
+    const hue2rgb = (p, q, t) => {
+      if (t < 0) t += 1
+      if (t > 1) t -= 1
+      if (t < 1/6) return p + (q - p) * 6 * t
+      if (t < 1/2) return q
+      if (t < 2/3) return p + (q - p) * (2/3 - t) * 6
+      return p
+    }
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s
+    const p = 2 * l - q
+    r = hue2rgb(p, q, h + 1/3)
+    g = hue2rgb(p, q, h)
+    b = hue2rgb(p, q, h - 1/3)
+  }
+  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)]
+}
+
+const hexToHsl = hex => {
+  const rgb = hexToRgb(hex)
+  return rgb ? rgbToHsl(rgb[0], rgb[1], rgb[2]) : null
+}
+
+const hslToHex = (h, s, l) => {
+  const [r, g, b] = hslToRgb(h, s, l)
+  return rgbToHex(r, g, b)
 }
 
 // ── palette extraction: median-cut ──────────────────────────────────────────
@@ -548,6 +581,7 @@ function SwatchTray({ entry }) {
 
   const move = (from, to) => {
     if (from === to) return
+    $wheelOpen.set(null)
     const sw = [...swatches]
     const [moved] = sw.splice(from, 1)
     sw.splice(to, 0, moved)
@@ -559,6 +593,7 @@ function SwatchTray({ entry }) {
   // Primary interaction: click a swatch to pick it up, click a slot to place
   // it. Works with any pointer; drag remains available as a fast path.
   const place = i => {
+    if ($wheelOpen.get()) $wheelOpen.set(null)
     if (pickedHere === null) {
       $picked.set({ slug: entry.name, index: i })
       return
@@ -571,12 +606,30 @@ function SwatchTray({ entry }) {
     $picked.set(null)
   }
 
+  const wheel = useValue($wheelOpen)
+  const wheelHere = wheel && wheel.slug === entry.name ? wheel.index : null
+
+  const openWheel = i => {
+    if (pickedHere !== null) return
+    $wheelOpen.set({ slug: entry.name, index: i })
+  }
+
+  const commitWheel = (index, hex) => {
+    const next = swatches.map((s, i) => (i === index ? { ...s, hex, hsl: hexToHsl(hex) } : s))
+    const theme = synthesize(next, entry)
+    updateTheme(entry.name, { swatches: next, theme })
+    $wheelOpen.set(null)
+    haptic('tap')
+  }
+
   return jsxs('div', {
     className: 'flex flex-col gap-1',
     children: [
       jsx('div', {
         className: 'text-[0.625rem] text-(--ui-text-quaternary)',
-        children: pickedHere !== null ? 'picked up — click a slot to place (click again to cancel)' : 'swatch 1 = background hue · swatch 2 = text · tap to pick up, tap to place'
+        children: pickedHere !== null
+          ? 'picked up — click a slot to place (click again to cancel)'
+          : 'swatch 1 = background hue · swatch 2 = text · tap to pick up, double-click to edit'
       }),
       jsx('div', {
         className: 'flex flex-wrap gap-1.5',
@@ -589,6 +642,7 @@ function SwatchTray({ entry }) {
               draggable: true,
               title: `#${i + 1} · ${s.hex}`,
               onClick: () => place(i),
+              onDoubleClick: () => openWheel(i),
               onKeyDown: ev => {
                 if (ev.key === 'Enter' || ev.key === ' ') {
                   ev.preventDefault()
@@ -629,7 +683,137 @@ function SwatchTray({ entry }) {
             `sw-${i}`
           )
         )
-      })
+      }),
+      wheelHere !== null && wheelHere < swatches.length
+        ? jsx(ColorWheelPanel, {
+            value: swatches[wheelHere].hex,
+            onChange: hex => {
+              const next = swatches.map((s, i) => (i === wheelHere ? { ...s, hex, hsl: hexToHsl(hex) } : s))
+              const theme = synthesize(next, entry)
+              updateTheme(entry.name, { swatches: next, theme })
+            },
+            onCommit: hex => commitWheel(wheelHere, hex),
+            onCancel: () => $wheelOpen.set(null)
+          })
+        : null
+    ]
+  })
+}
+
+function clamp01(n) {
+  return n < 0 ? 0 : n > 1 ? 1 : n
+}
+
+function hslString(h, s, l) {
+  return `hsl(${Math.round(((h % 1) + 1) % 1 * 360)}, ${Math.round(clamp01(s) * 100)}%, ${Math.round(clamp01(l) * 100)}%)`
+}
+
+function ColorWheelPanel({ value, onChange, onCommit, onCancel }) {
+  const base = hexToHsl(value) || { h: 0, s: 0.75, l: 0.5 }
+  const [h, setH] = useState(base.h)
+  const [s, setS] = useState(base.s)
+  const [l, setL] = useState(base.l)
+  const live = hslToHex(h, s, l)
+  const wheelRef = useRef(null)
+  const dragging = useRef(null)
+
+  const wheelFromPoint = (clientX, clientY) => {
+    const rect = wheelRef.current?.getBoundingClientRect()
+    if (!rect) return null
+    const x = clientX - rect.left - rect.width / 2
+    const y = clientY - rect.top - rect.height / 2
+    const radius = Math.min(rect.width, rect.height) / 2
+    const dist = Math.sqrt(x * x + y * y) / radius
+    if (dist < 0.08 || dist > 1.02) return null
+    let angle = Math.atan2(y, x) / (2 * Math.PI)
+    if (angle < 0) angle += 1
+    return { h: angle, s: Math.min(1, dist) }
+  }
+
+  const onWheelPointerDown = ev => {
+    const hit = wheelFromPoint(ev.clientX, ev.clientY)
+    if (!hit) return
+    dragging.current = true
+    setH(hit.h)
+    setS(hit.s)
+    ev.currentTarget.setPointerCapture?.(ev.pointerId)
+    ev.preventDefault()
+  }
+
+  const onWheelPointerMove = ev => {
+    if (!dragging.current) return
+    const hit = wheelFromPoint(ev.clientX, ev.clientY)
+    if (!hit) return
+    setH(hit.h)
+    setS(hit.s)
+    ev.preventDefault()
+  }
+
+  const onWheelPointerUp = () => {
+    dragging.current = false
+  }
+
+  return jsxs('div', {
+    className: 'flex items-center gap-2 rounded-[6px] border border-(--ui-stroke-secondary) p-2',
+    style: { background: 'var(--chrome-action-hover)', height: 170 },
+    children: [
+      jsx('div', {
+        ref: wheelRef,
+        onPointerDown: onWheelPointerDown,
+        onPointerMove: onWheelPointerMove,
+        onPointerUp: onWheelPointerUp,
+        onPointerCancel: onWheelPointerUp,
+        title: 'angle = hue · radius = saturation',
+        className: 'relative h-[140px] w-[140px] shrink-0 cursor-crosshair select-none rounded-full',
+        style: {
+          background:
+            `conic-gradient(from 0deg, hsl(0,100%,50%), hsl(60,100%,50%), hsl(120,100%,50%), hsl(180,100%,50%), hsl(240,100%,50%), hsl(300,100%,50%), hsl(360,100%,50%)),` +
+            `radial-gradient(farthest-corner, #fff 0%, rgba(255,255,255,0) 58%, rgba(0,0,0,0.45) 100%)`,
+          backgroundBlendMode: 'normal, normal'
+        },
+        children: [
+          jsx('div', {
+            className: 'pointer-events-none absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/70 shadow-[0_0_0_1px_rgba(0,0,0,0.45)]',
+            style: {
+              transform: `translate(calc(-50% + ${Math.cos(h * 2 * Math.PI) * s * 54}px), calc(-50% + ${Math.sin(h * 2 * Math.PI) * s * 54}px))`,
+              background: live
+            }
+          }),
+          jsx('div', {
+            className: 'pointer-events-none absolute inset-0 rounded-full',
+            style: { background: `radial-gradient(circle, transparent 56%, rgba(0,0,0,0.18) 78%, rgba(0,0,0,0.5) 100%)` }
+          })
+        ]
+      }),
+      jsxs('div', { className: 'flex min-w-0 flex-col gap-2', children: [
+        jsxs('div', { className: 'flex items-center gap-2', children: [
+          jsx('div', {
+            className: 'h-8 w-8 shrink-0 rounded-[4px] shadow-[inset_0_0_0_1px_rgba(128,128,128,0.45)]',
+            style: { background: live }
+          }),
+          jsxs('div', { className: 'min-w-0', children: [
+            jsx('div', { className: 'truncate text-xs font-medium text-(--ui-text-primary)', children: live.toUpperCase() }),
+            jsx('div', { className: 'text-[0.625rem] text-(--ui-text-tertiary)', children: `${Math.round(h * 360)}° hue · ${Math.round(s * 100)}% sat · ${Math.round(l * 100)}% light` })
+          ] })
+        ] }),
+        jsxs('div', { className: 'flex flex-col gap-1', children: [
+          jsx('div', { className: 'text-[0.625rem] text-(--ui-text-quaternary)', children: 'Lightness' }),
+          jsx('input', {
+            type: 'range',
+            min: 0,
+            max: 1,
+            step: 0.005,
+            value: l,
+            onChange: ev => setL(Number(ev.target.value)),
+            className: 'h-1 w-full accent-(--ui-accent)',
+            style: { background: `linear-gradient(to right, #000, ${live})`, borderRadius: 999 }
+          })
+        ] }),
+        jsxs('div', { className: 'flex items-center gap-1.5', children: [
+          jsx(Button, { variant: 'secondary', size: 'xs', onClick: onCancel, children: 'Cancel' }),
+          jsx(Button, { variant: 'primary', size: 'xs', onClick: () => onCommit(live), children: 'OK' })
+        ] })
+      ] })
     ]
   })
 }
