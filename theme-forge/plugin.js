@@ -40,6 +40,14 @@ const $mode = atom('dark')
 const $expanded = atom(null) // slug with terminal preview open
 const $editing = atom(null) // slug being renamed
 const $picked = atom(null) // { slug, index } — swatch awaiting a new position
+const $viewMode = atom('cards') // 'cards' | 'strip' — strip = quiet swatch-only overview
+const $viewModeKey = 'theme-forge-viewMode'
+
+/** Strip mode is display-only; card mode is the editor. */
+function normalizeViewMode(v) {
+  return v === 'strip' ? 'strip' : 'cards'
+}
+
 const $wheelOpen = atom(null) // { slug, index } — single inline color editor
 
 // ── color math ──────────────────────────────────────────────────────────────
@@ -519,6 +527,71 @@ function reforge(entry) {
     .catch(err => host.notifyError(err, 'Theme Forge'))
 }
 
+function applyTheme(entry) {
+  host.navigate('/settings?tab=config:appearance')
+  host.notify({ kind: 'info', message: `Click "${entry.label}" in the grid to apply.` })
+}
+
+function StripRow({ entry, onOpen }) {
+  const theme = entry.theme || {}
+  const t = theme.darkTerminal || theme.terminal || {}
+  const colors = theme.darkColors || theme.colors || {}
+  const swatches = entry.swatches && entry.swatches.length ? entry.swatches : deriveSwatches(theme)
+
+  const handleClick = ev => {
+    if (ev.target.closest('button')) return
+    onOpen?.()
+  }
+
+  const handleApply = ev => {
+    ev.stopPropagation()
+    applyTheme(entry)
+  }
+
+  const label = entry.label || theme.label || entry.name
+  const thumb = entry.source
+    ? jsx('img', { src: entry.source, alt: '', className: 'h-5 w-5 shrink-0 rounded-[2px] object-cover' })
+    : jsx('div', {
+        className: 'h-5 w-5 shrink-0 rounded-[2px]',
+        style: { background: `linear-gradient(135deg, ${colors.background || '#222'} 0%, ${colors.primary || '#666'} 100%)` }
+      })
+
+  return jsxs('button', {
+    type: 'button',
+    onClick: handleClick,
+    className: cn(
+      'flex w-full items-center gap-2 rounded-none px-1.5 py-1 text-left',
+      'hover:bg-(--chrome-action-hover) active:bg-(--chrome-active-hover)'
+    ),
+    children: [
+      thumb,
+      jsx('div', {
+        className: 'min-w-0 flex-1 truncate text-[0.6875rem] text-(--ui-text-tertiary)',
+        title: label,
+        children: label
+      }),
+      jsxs('div', { className: 'flex shrink-0 items-center gap-1', children: [
+        swatches.slice(0, 8).map((s, i) =>
+          jsx('span', {
+            key: i,
+            className: 'h-3.5 w-3.5 shrink-0 rounded-[2px]',
+            style: { background: s.hex },
+            title: `#${i + 1} · ${s.hex}`,
+            'aria-hidden': true
+          }, `s-${i}`)
+        ),
+        jsx(Button, {
+          variant: 'ghost',
+          size: 'icon-xs',
+          title: 'Apply theme',
+          onClick: handleApply,
+          children: jsx(icons.Palette, { className: 'size-3.5' })
+        })
+      ] })
+    ]
+  })
+}
+
 // ── UI bits ─────────────────────────────────────────────────────────────────
 
 /** Card thumbnail: the kept source image, or a color field built from the
@@ -818,7 +891,7 @@ function ColorWheelPanel({ value, onChange, onCommit, onCancel }) {
   })
 }
 
-function ThemeCard({ entry }) {
+function ThemeCardActual({ entry }) {
   const expanded = useValue($expanded) === entry.name
   const editing = useValue($editing) === entry.name
   const mode = useValue($mode)
@@ -930,10 +1003,22 @@ function ForgePane() {
   const busy = useValue($busy)
   const generated = useValue($generated)
   const mode = useValue($mode)
+  const viewMode = useValue($viewMode)
 
   const onDrop = ev => {
     ev.preventDefault()
     handleFile(ev.dataTransfer?.files?.[0])
+  }
+
+  const setViewMode = v => {
+    $viewMode.set(normalizeViewMode(v))
+    storageRef?.set($viewModeKey, normalizeViewMode(v))
+  }
+
+  const openCard = entry => {
+    $viewMode.set('cards')
+    storageRef?.set($viewModeKey, 'cards')
+    $expanded.set(entry.name)
   }
 
   return jsxs('div', {
@@ -944,20 +1029,27 @@ function ForgePane() {
     onDrop,
     children: [
       jsxs('div', {
-        className: 'flex items-center justify-between',
+        className: 'flex items-center justify-between gap-2',
         children: [
-          jsx('div', { className: 'font-medium text-(--ui-text-primary)', children: 'Theme Forge' }),
-          jsx('div', {
-            className: 'w-[130px]',
-            children: jsx(SegmentedControl, {
+          jsx('div', { className: 'min-w-0 truncate font-medium text-(--ui-text-primary)', children: 'Theme Forge' }),
+          jsxs('div', { className: 'flex shrink-0 items-center gap-1', children: [
+            jsx('div', { className: 'w-[100px]', children: jsx(SegmentedControl, {
+              options: [
+                { id: 'cards', label: 'Cards' },
+                { id: 'strip', label: 'Strip' }
+              ],
+              value: viewMode,
+              onChange: v => setViewMode(v)
+            }) }),
+            jsx('div', { className: 'w-[80px]', children: jsx(SegmentedControl, {
               options: [
                 { id: 'dark', label: 'Dark' },
                 { id: 'light', label: 'Light' }
               ],
               value: mode,
               onChange: v => $mode.set(v)
-            })
-          })
+            }) })
+          ] })
         ]
       }),
 
@@ -984,9 +1076,13 @@ function ForgePane() {
           jsx(ScrollArea, {
             className: 'min-h-0 flex-1',
             children: jsx('div', {
-              className: 'flex flex-col gap-2 pb-2',
+              className: viewMode === 'strip' ? 'flex flex-col gap-px' : 'flex flex-col gap-2 pb-2',
               children: generated.length
-                ? generated.map(entry => jsx(ThemeCard, { entry }, entry.name))
+                ? generated.map(entry =>
+                    viewMode === 'strip'
+                      ? jsx(StripRow, { entry, onOpen: () => openCard(entry) })
+                      : jsx(ThemeCard, { entry }, entry.name)
+                  )
                 : jsx('div', { className: 'py-2 text-xs text-(--ui-text-tertiary)', children: 'None yet — forge one above.' })
             })
           })
@@ -1022,6 +1118,8 @@ export default {
       if (entry?.theme?.name && entry.theme.colors) registerTheme(entry.theme)
     }
     $generated.set(migrated)
+
+    $viewMode.set(normalizeViewMode(ctx.storage.get($viewModeKey, 'cards')))
 
     ctx.register({
       id: 'pane',

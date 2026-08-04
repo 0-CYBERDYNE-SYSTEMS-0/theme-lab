@@ -136,3 +136,23 @@ check('slot2-ctrl: single swatch still derives fg', typeof themeSingle.darkColor
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} FAILURES`)
 process.exit(failures ? 1 : 0)
+
+// ── Plugin behavior probes ────────────────────────────────────────────────
+const pluginPath = process.env.HOME + '/.hermes/desktop-plugins/theme-forge/plugin.js'
+const pluginSrc = fs.readFileSync(pluginPath, 'utf8')
+
+// viewMode persistence defaults to cards and round-trips through storage.
+const viewModeMatch = pluginSrc.match(/const \$viewModeKey = '([^']+)'/)
+const viewModeKey = viewModeMatch ? viewModeMatch[1] : null
+check('storage: viewMode key is declared', !!viewModeKey, viewModeKey || 'missing')
+
+const storageRoundTripOk = pluginSrc.includes(`$viewModeKey`) &&
+  pluginSrc.includes(`ctx.storage.get($viewModeKey, 'cards')`) &&
+  pluginSrc.includes(`storageRef?.set($viewModeKey, normalizeViewMode(v))`) &&
+  pluginSrc.includes(`storageRef?.set($viewModeKey, 'cards')`)
+check('storage: viewMode default + persisted round-trip wired', storageRoundTripOk)
+
+const stripRowExists = /function StripRow\(/.test(pluginSrc)
+check('ui: StripRow component exists', stripRowExists)
+const stripEntrypoint = pluginSrc.includes('StripRow')
+check('ui: strip mode renders StripRow', stripEntrypoint)
