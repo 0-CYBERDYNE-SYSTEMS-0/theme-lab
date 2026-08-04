@@ -571,21 +571,49 @@ function StripRow({ entry, onOpen }) {
         children: label
       }),
       jsxs('div', { className: 'flex shrink-0 items-center gap-1', children: [
-        swatches.slice(0, 8).map((s, i) =>
-          jsx('span', {
-            key: i,
-            className: 'h-3.5 w-3.5 shrink-0 rounded-[2px]',
-            style: { background: s.hex },
-            title: `#${i + 1} · ${s.hex}`,
-            'aria-hidden': true
-          }, `s-${i}`)
-        ),
-        jsx(Button, {
-          variant: 'ghost',
-          size: 'icon-xs',
-          title: 'Apply theme',
-          onClick: handleApply,
-          children: jsx(icons.Palette, { className: 'size-3.5' })
+        jsx('div', {
+          ref: el => {
+            if (!el) return
+            const inner = el.firstElementChild
+            if (!inner) return
+            const hint = el._scrollHint
+            const overflow = inner.scrollWidth > el.clientWidth + 1
+            if (!overflow && hint) { hint.style.opacity = '0'; hint.removeAttribute('aria-hidden') }
+            else if (overflow && !hint) {
+              const node = document.createElement('span')
+              node.setAttribute('aria-hidden', 'true')
+              node.style.cssText = 'position:absolute;right:0;top:0;bottom:0;width:14px;pointer-events:none;background:linear-gradient(to right, transparent, var(--chrome-action-hover));'
+              el.appendChild(node)
+              el._scrollHint = node
+            }
+          },
+          onWheel: ev => {
+            const el = ev.currentTarget
+            if (Math.abs(ev.deltaY) > Math.abs(ev.deltaX)) {
+              ev.preventDefault()
+              el.scrollLeft += ev.deltaY
+            }
+          },
+          className: 'relative flex flex-nowrap overflow-x-auto overflow-y-visible',
+          style: { scrollbarWidth: 'none', scrollSnapType: 'x proximity' },
+          children: [
+            ...swatches.slice(0, 8).map((s, i) =>
+              jsx('span', {
+                key: i,
+                className: 'h-3.5 w-3.5 shrink-0 rounded-[2px]',
+                style: { background: s.hex, scrollSnapAlign: 'start' },
+                title: `#${i + 1} · ${s.hex}`,
+                'aria-hidden': true
+              }, `s-${i}`)
+            ),
+            jsx(Button, {
+              variant: 'ghost',
+              size: 'icon-xs',
+              title: 'Apply theme',
+              onClick: handleApply,
+              children: jsx(icons.Palette, { className: 'size-3.5' })
+            })
+          ]
         })
       ] })
     ]
@@ -705,7 +733,30 @@ function SwatchTray({ entry }) {
           : 'swatch 1 = background hue · swatch 2 = text · tap to pick up, double-click to edit'
       }),
       jsx('div', {
-        className: 'flex flex-wrap gap-1.5',
+        ref: el => {
+          if (!el) return
+          const inner = el.firstElementChild
+          if (!inner) return
+          const hint = el._scrollHint
+          const overflow = inner.scrollWidth > el.clientWidth + 1
+          if (!overflow && hint) { hint.style.opacity = '0'; hint.removeAttribute('aria-hidden') }
+          else if (overflow && !hint) {
+            const node = document.createElement('span')
+            node.setAttribute('aria-hidden', 'true')
+            node.style.cssText = 'position:absolute;right:0;top:0;bottom:0;width:18px;pointer-events:none;background:linear-gradient(to right, transparent, var(--chrome-action-hover));'
+            el.appendChild(node)
+            el._scrollHint = node
+          }
+        },
+        onWheel: ev => {
+          const el = ev.currentTarget
+          if (Math.abs(ev.deltaY) > Math.abs(ev.deltaX)) {
+            ev.preventDefault()
+            el.scrollLeft += ev.deltaY
+          }
+        },
+        className: 'relative flex flex-nowrap gap-1.5 overflow-x-auto overflow-y-visible',
+        style: { scrollbarWidth: 'none', scrollSnapType: 'x proximity' },
         children: swatches.map((s, i) =>
           jsx(
             'div',
@@ -745,12 +796,12 @@ function SwatchTray({ entry }) {
                 setOver(null)
               },
               className: cn(
-                'flex h-9 w-9 cursor-pointer items-center justify-center rounded-[5px] text-xs font-bold transition-transform',
+                'flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-[5px] text-xs font-bold transition-transform',
                 'shadow-[inset_0_0_0_1px_rgba(128,128,128,0.45)] hover:scale-105',
                 pickedHere === i && 'scale-110 shadow-[0_0_0_2px_var(--ui-accent)]',
                 over === i && 'scale-110 shadow-[0_0_0_2px_var(--ui-accent)]'
               ),
-              style: { background: s.hex, color: readableOn(s.hex), outline: pickedHere === i ? '2px solid var(--ui-accent)' : 'none' },
+              style: { background: s.hex, color: readableOn(s.hex), outline: pickedHere === i ? '2px solid var(--ui-accent)' : 'none', scrollSnapAlign: 'start' },
               children: i + 1
             },
             `sw-${i}`
