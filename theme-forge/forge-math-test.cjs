@@ -12,8 +12,8 @@ const end = src.indexOf('// ── forge pipeline')
 let core = src.slice(start, end)
 
 // eval in this scope — wrap so const bindings come back out
-const api = new Function(core + '; return {rgbToHex, rgbToHsl, buildColorsFromPalette, ansiPalette, synthesize, deriveSwatches, contrast, luminance, mix, readableOn, ensureContrast}')()
-const { rgbToHex, rgbToHsl, buildColorsFromPalette, ansiPalette, synthesize, deriveSwatches, contrast, luminance, mix, readableOn, ensureContrast } = api
+const api = new Function(core + '; return {rgbToHex, hexToRgb, rgbToHsl, buildColorsFromPalette, ansiPalette, synthesize, deriveSwatches, contrast, luminance, mix, readableOn, ensureContrast}')()
+const { rgbToHex, hexToRgb, rgbToHsl, buildColorsFromPalette, ansiPalette, synthesize, deriveSwatches, contrast, luminance, mix, readableOn, ensureContrast } = api
 
 // Simulate palette output of extractPalette for our test image blocks
 const mk = (r, g, b, w) => ({ hex: rgbToHex(r, g, b), hsl: rgbToHsl(r, g, b), weight: w })
@@ -66,6 +66,40 @@ check('deriveSwatches: 4-8 swatches from tokens', derived.length >= 4 && derived
 check('deriveSwatches: valid hex + hsl', derived.every(s => /^#[0-9a-f]{6}$/i.test(s.hex) && typeof s.hsl.h === 'number'))
 const t3 = synthesize(derived, meta)
 check('deriveSwatches: resynthesis round-trip', REQUIRED.every(k => typeof t3.colors[k] === 'string') && typeof t3.terminal.green === 'string')
+
+// ── Slot-1 background control (regression: hue sort used to override position) ──
+const hueDist = (a, b) => {
+  const d = Math.abs(a * 360 - b * 360) % 360
+  return d > 180 ? 360 - d : d
+}
+// Build an order where slot 1 is NOT the darkest color — old code would have
+// ignored slot 1 and used the darkest anyway.
+const teal = mk(46, 160, 120, 5000)   // mid-tone teal, deliberately not darkest
+const deepBlue = mk(13, 47, 134, 4000)
+const ordered2 = [teal, deepBlue, mk(255, 120, 50, 3000), mk(255, 224, 196, 2000), mk(120, 30, 80, 1000)]
+const themeA = synthesize(ordered2, { name: 'x', label: 'x', mode: 'dark' })
+const bgA = themeA.darkColors.background
+const bgAHue = rgbToHsl(...hexToRgb(bgA)).h
+check('slot1-ctrl: dark bg hue follows teal seed', hueDist(bgAHue, teal.hsl.h) < 35, `bg ${bgA} hueDist=${hueDist(bgAHue, teal.hsl.h).toFixed(1)}°`)
+check('slot1-ctrl: dark bg stays dark w/ mid-tone seed', luminance(bgA) < 0.15, luminance(bgA).toFixed(3))
+
+// Swap: put deep blue in slot 1 — bg hue must follow
+const ordered3 = [deepBlue, teal, mk(255, 120, 50, 3000), mk(255, 224, 196, 2000), mk(120, 30, 80, 1000)]
+const themeB = synthesize(ordered3, { name: 'x', label: 'x', mode: 'dark' })
+const bgB = themeB.darkColors.background
+const bgBHue = rgbToHsl(...hexToRgb(bgB)).h
+check('slot1-ctrl: swap changes bg hue', hueDist(bgBHue, deepBlue.hsl.h) < 35 && hueDist(bgAHue, bgBHue) > 20, `bgA=${bgA} bgB=${bgB} Δ=${hueDist(bgAHue, bgBHue).toFixed(1)}°`)
+
+// Light mode: dark seed in slot 1 must still yield a light background
+const themeC = synthesize([deepBlue, teal, mk(255, 224, 196, 2000)], { name: 'x', label: 'x', mode: 'light' })
+const bgC = themeC.colors.background
+check('slot1-ctrl: light bg stays light w/ dark seed', luminance(bgC) > 0.6, luminance(bgC).toFixed(3))
+check('slot1-ctrl: light bg keeps seed hue', hueDist(rgbToHsl(...hexToRgb(bgC)).h, deepBlue.hsl.h) < 40, `bg ${bgC}`)
+
+// Very bright seed in dark mode: must still land dark
+const themeD = synthesize([mk(255, 224, 196, 5000), teal, deepBlue], { name: 'x', label: 'x', mode: 'dark' })
+const bgD = themeD.darkColors.background
+check('slot1-ctrl: dark bg from bright seed still dark', luminance(bgD) < 0.2, luminance(bgD).toFixed(3))
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} FAILURES`)
 process.exit(failures ? 1 : 0)

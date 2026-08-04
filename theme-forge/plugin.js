@@ -39,6 +39,7 @@ const $generated = atom([]) // persisted themes (full objects) — single source
 const $mode = atom('dark')
 const $expanded = atom(null) // slug with terminal preview open
 const $editing = atom(null) // slug being renamed
+const $picked = atom(null) // { slug, index } — swatch awaiting a new position
 
 // ── color math ──────────────────────────────────────────────────────────────
 
@@ -246,25 +247,36 @@ function ansiPalette(ordered, bg) {
 }
 
 function buildColorsFromPalette(ordered, wantDark) {
+  const seed = ordered[0] || { hex: wantDark ? '#101014' : '#fafafa', hsl: { h: 0, s: 0, l: wantDark ? 0.06 : 0.97 } }
   const rest = ordered.slice(1)
-  const byLum = [...ordered].sort((a, b) => a.hsl.l - b.hsl.l)
+  const byLum = [...rest].sort((a, b) => a.hsl.l - b.hsl.l)
   const chromaRank = [...rest].sort((a, b) => b.hsl.s * (1 - Math.abs(b.hsl.l - 0.5)) - a.hsl.s * (1 - Math.abs(a.hsl.l - 0.5)))
 
   // accent = first chromatic swatch in USER order (priority), else chroma rank
   const userAccent = rest.find(c => c.hsl.s > 0.12)
-  const accentRaw = userAccent || chromaRank[0] || ordered[0]
+  const accentRaw = userAccent || chromaRank[0] || seed
 
+  // ── Background: slot 1 IS the background hue seed. Its hue drives the
+  // surface; lightness is enforced toward dark/light so ANY image color works
+  // as a background. Drag a new color into slot 1 → background hue follows.
+  const seedLum = luminance(seed.hex)
   let background
+  if (wantDark) {
+    const t = seedLum <= 0.02 ? 0 : Math.min(0.8, 0.35 + seedLum * 1.2)
+    background = mix(seed.hex, '#060608', t)
+  } else {
+    const t = seedLum >= 0.9 ? 0 : Math.min(0.85, 0.3 + (0.9 - seedLum))
+    background = mix(seed.hex, '#ffffff', t)
+  }
+
+  // Foreground: luminance extreme of the REMAINING swatches (derived neutral —
+  // nobody hand-manages text color), contrast-guaranteed below.
   let foreground
   if (wantDark) {
-    background = byLum[0].hex
-    if (luminance(background) > 0.09) background = mix(background, '#060608', 0.55)
-    foreground = byLum[byLum.length - 1].hex
+    foreground = (byLum[byLum.length - 1] || seed).hex
     if (luminance(foreground) < 0.55) foreground = mix(foreground, '#ffffff', 0.75)
   } else {
-    background = byLum[byLum.length - 1].hex
-    if (luminance(background) < 0.72) background = mix(background, '#ffffff', 0.7)
-    foreground = byLum[0].hex
+    foreground = (byLum[0] || seed).hex
     if (luminance(foreground) > 0.35) foreground = mix(foreground, '#060608', 0.7)
   }
 
@@ -515,6 +527,8 @@ function TermPreview({ theme, mode }) {
 function SwatchTray({ entry }) {
   const dragIdx = useRef(null)
   const [over, setOver] = useState(null)
+  const picked = useValue($picked)
+  const pickedHere = picked && picked.slug === entry.name ? picked.index : null
 
   // v1-era entries persisted with an empty swatch list — recover from tokens
   const swatches = entry.swatches && entry.swatches.length > 0 ? entry.swatches : deriveSwatches(entry.theme)
@@ -529,48 +543,75 @@ function SwatchTray({ entry }) {
     haptic('tap')
   }
 
+  // Primary interaction: click a swatch to pick it up, click a slot to place
+  // it. Works with any pointer; drag remains available as a fast path.
+  const place = i => {
+    if (pickedHere === null) {
+      $picked.set({ slug: entry.name, index: i })
+      return
+    }
+    if (pickedHere === i) {
+      $picked.set(null) // toggle off
+      return
+    }
+    move(pickedHere, i)
+    $picked.set(null)
+  }
+
   return jsxs('div', {
     className: 'flex flex-col gap-1',
     children: [
       jsx('div', {
         className: 'text-[0.625rem] text-(--ui-text-quaternary)',
-        children: 'drag swatches: 1st = background seed · order = accent priority'
+        children: pickedHere !== null ? 'picked up — click a slot to place (click again to cancel)' : 'swatch 1 = background hue · tap to pick up, tap to place'
       }),
       jsx('div', {
-        className: 'flex flex-wrap gap-1',
+        className: 'flex flex-wrap gap-1.5',
         children: swatches.map((s, i) =>
           jsx(
             'div',
             {
+              role: 'button',
+              tabIndex: 0,
               draggable: true,
-              title: `#${i + 1} ${s.hex} — drag to reorder`,
+              title: `#${i + 1} · ${s.hex}`,
+              onClick: () => place(i),
+              onKeyDown: ev => {
+                if (ev.key === 'Enter' || ev.key === ' ') {
+                  ev.preventDefault()
+                  place(i)
+                }
+              },
               onDragStart: ev => {
                 dragIdx.current = i
                 ev.dataTransfer.effectAllowed = 'move'
+                ev.dataTransfer.setData('text/plain', String(i))
               },
               onDragOver: ev => {
                 ev.preventDefault()
+                ev.dataTransfer.dropEffect = 'move'
                 setOver(i)
               },
               onDragLeave: () => setOver(v => (v === i ? null : v)),
               onDrop: ev => {
                 ev.preventDefault()
+                ev.stopPropagation()
                 setOver(null)
                 if (dragIdx.current !== null) move(dragIdx.current, i)
                 dragIdx.current = null
               },
+              onDragEnd: () => {
+                dragIdx.current = null
+                setOver(null)
+              },
               className: cn(
-                'relative h-6 w-6 cursor-grab rounded-[4px] transition-transform active:cursor-grabbing',
-                'shadow-[inset_0_0_0_1px_rgba(128,128,128,0.4)]',
+                'flex h-9 w-9 cursor-pointer items-center justify-center rounded-[5px] text-xs font-bold transition-transform',
+                'shadow-[inset_0_0_0_1px_rgba(128,128,128,0.45)] hover:scale-105',
+                pickedHere === i && 'scale-110 shadow-[0_0_0_2px_var(--ui-accent)]',
                 over === i && 'scale-110 shadow-[0_0_0_2px_var(--ui-accent)]'
               ),
-              style: { background: s.hex },
-              children: jsx('span', {
-                className:
-                  'absolute -top-1 -right-1 flex h-3 w-3 items-center justify-center rounded-full text-[0.5rem] font-bold',
-                style: { background: s.hex, color: readableOn(s.hex), boxShadow: 'inset 0 0 0 1px rgba(128,128,128,0.5)' },
-                children: i + 1
-              })
+              style: { background: s.hex, color: readableOn(s.hex), outline: pickedHere === i ? '2px solid var(--ui-accent)' : 'none' },
+              children: i + 1
             },
             `sw-${i}`
           )
