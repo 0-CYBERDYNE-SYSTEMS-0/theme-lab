@@ -241,7 +241,7 @@ const slugify = s =>
     .replace(/^-+|-+$/g, '')
     .slice(0, 40) || 'forged'
 
-function ansiPalette(ordered, bg) {
+function ansiPalette(ordered, bg, fgSeed) {
   const bgL = luminance(bg)
   const darkBg = bgL < 0.5
   // accent priority = swatches after the bg seed, chromatic ones first
@@ -265,7 +265,9 @@ function ansiPalette(ordered, bg) {
   const white = darkBg ? mix(bg, '#ffffff', 0.85) : mix(bg, '#000000', 0.08)
 
   return {
-    foreground: readableOn(bg),
+    // Terminal body text follows the slot-2 swatch VERBATIM — the exact color
+    // the user places is the exact terminal foreground. No contrast re-mix.
+    foreground: fgSeed ? fgSeed : readableOn(bg),
     cursor: tune(pick(150, 260, 0), 0.2),
     selectionBackground: darkBg ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.14)',
     black,
@@ -297,33 +299,22 @@ function buildColorsFromPalette(ordered, wantDark) {
   const userAccent = rest.find(c => c.hsl.s > 0.12)
   const accentRaw = userAccent || chromaRank[0] || seed
 
-  // ── Background: slot 1 IS the background hue seed. Its hue drives the
-  // surface; lightness is enforced toward dark/light so ANY image color works
-  // as a background. Drag a new color into slot 1 → background hue follows.
-  const seedLum = luminance(seed.hex)
-  let background
-  if (wantDark) {
-    const t = seedLum <= 0.02 ? 0 : Math.min(0.8, 0.35 + seedLum * 1.2)
-    background = mix(seed.hex, '#060608', t)
-  } else {
-    const t = seedLum >= 0.9 ? 0 : Math.min(0.85, 0.3 + (0.9 - seedLum))
-    background = mix(seed.hex, '#ffffff', t)
-  }
+  // ── Background: slot 1 IS the background color, VERBATIM. No lightness
+  // enforcement, no mix-toward-black/white: the color the user places in
+  // slot 1 is exactly the background the theme uses. (The old enforcement
+  // "blended" every seed toward near-black/near-white, so placing a swatch
+  // never showed THAT color.)
+  const background = seed.hex
 
-  // Foreground: slot 2 IS the foreground hue seed when present.
-  // Its lightness is enforced toward a usable value, then contrast-guaranteed below.
+  // Foreground: slot 2 IS the foreground/text color, VERBATIM. No lightness
+  // guidance, no contrast mix: the exact color the user places in slot 2 is
+  // the exact text color the theme uses (UI + terminal). This is the fix for
+  // "swapped swatches and text never visibly changed" — the old code blended
+  // every slot-2 seed toward near-white/near-black for contrast, so the swap
+  // never showed THAT color.
   let foreground
   if (ordered.length >= 2) {
     foreground = ordered[1].hex
-    if (wantDark) {
-      let t = 0.5
-      while (t <= 1.001 && luminance(mix(foreground, '#ffffff', t)) < 0.55) t += 0.05
-      foreground = mix(foreground, '#ffffff', Math.min(t, 1))
-    } else {
-      let t = 0.5
-      while (t <= 1.001 && luminance(mix(foreground, '#060608', t)) > 0.35) t += 0.05
-      foreground = mix(foreground, '#060608', Math.min(t, 1))
-    }
   } else {
     if (wantDark) {
       foreground = (byLum[byLum.length - 1] || seed).hex
@@ -334,7 +325,7 @@ function buildColorsFromPalette(ordered, wantDark) {
     }
   }
 
-  const accentSafe = ensureContrast(accentRaw.hex, background, wantDark ? 3.2 : 3)
+  const accentSafe = accentRaw.hex
   const card = wantDark ? mix(background, '#ffffff', 0.045) : mix(background, '#000000', 0.015)
   const muted = wantDark ? mix(background, '#ffffff', 0.07) : mix(background, '#000000', 0.045)
   const mutedFg = ensureContrast(mix(foreground, background, 0.42), background, 4.5)
@@ -342,13 +333,15 @@ function buildColorsFromPalette(ordered, wantDark) {
 
   return {
     background,
-    foreground: ensureContrast(foreground, background, 7),
+    // Slot-2 color is the text color, verbatim — no contrast re-mix so the
+    // swap shows THAT color on screen. (Readability is the user's call now.)
+    foreground,
     card,
-    cardForeground: ensureContrast(foreground, card, 7),
+    cardForeground: foreground,
     muted,
     mutedForeground: mutedFg,
     popover: card,
-    popoverForeground: ensureContrast(foreground, card, 7),
+    popoverForeground: foreground,
     primary: accentSafe,
     primaryForeground: readableOn(accentSafe),
     secondary: mix(muted, accentSafe, 0.12),
@@ -374,14 +367,17 @@ function synthesize(ordered, meta) {
   const darkColors = buildColorsFromPalette(ordered, true)
   const lightColors = buildColorsFromPalette(ordered, false)
   const primary = meta.mode === 'light' ? lightColors : darkColors
+  // Slot 2 (index 1) is the TEXT seed — feed its raw hue to the terminal
+  // palette so the terminal's body text follows the same swatch as the UI.
+  const textSeed = ordered.length >= 2 ? ordered[1].hex : null
   return {
     name: meta.name,
     label: meta.label,
     description: 'Forged from an image · theme-forge plugin',
     colors: primary,
     darkColors,
-    terminal: ansiPalette(ordered, primary.background),
-    darkTerminal: ansiPalette(ordered, darkColors.background)
+    terminal: ansiPalette(ordered, primary.background, textSeed),
+    darkTerminal: ansiPalette(ordered, darkColors.background, textSeed)
   }
 }
 
@@ -609,13 +605,33 @@ function StripRow({ entry, onOpen }) {
           style: { scrollbarWidth: 'none', scrollSnapType: 'x proximity' },
           children: [
             ...swatches.slice(0, 8).map((s, i) =>
-              jsx('span', {
-                key: i,
-                className: 'h-3.5 w-3.5 shrink-0 rounded-[2px]',
-                style: { background: s.hex, scrollSnapAlign: 'start' },
-                title: `#${i + 1} · ${s.hex}`,
-                'aria-hidden': true
-              }, `s-${i}`)
+              jsxs(
+                'span',
+                {
+                  className: 'flex shrink-0 flex-col items-center',
+                  style: { scrollSnapAlign: 'start', gap: 1 },
+                  children: [
+                    jsx('span', {
+                      className: 'h-3.5 w-3.5 rounded-[2px]',
+                      style: { background: s.hex },
+                      title:
+                        i === 0
+                          ? `#1 · bkgnd · ${s.hex}`
+                          : i === 1
+                            ? `#2 · text · ${s.hex}`
+                            : `#${i + 1} · ${s.hex}`,
+                      'aria-hidden': true
+                    }),
+                    jsx('span', {
+                      className: 'text-[0.5rem] leading-none text-(--ui-text-quaternary)',
+                      style: { height: 7 },
+                      'aria-hidden': true,
+                      children: i === 0 ? 'bkgnd' : i === 1 ? 'text' : ''
+                    })
+                  ]
+                },
+                `s-${i}`
+              )
             ),
             jsx(Button, {
               variant: 'ghost',
@@ -769,69 +785,93 @@ function SwatchTray({ entry }) {
         className: 'relative flex gap-1.5 overflow-x-auto overflow-y-visible',
         style: { scrollbarWidth: 'none', scrollSnapType: 'x proximity' },
         children: swatches.map((s, i) =>
-          jsx(
+          jsxs(
             'div',
             {
-              role: 'button',
-              tabIndex: 0,
-              draggable: true,
-              title: `#${i + 1} · ${s.hex}`,
-              onClick: () => place(i),
-              onDoubleClick: () => openWheel(i),
-              onKeyDown: ev => {
-                if (ev.key === 'Enter' || ev.key === ' ') {
-                  ev.preventDefault()
-                  place(i)
-                }
-              },
-              onDragStart: ev => {
-                dragIdx.current = i
-                ev.dataTransfer.effectAllowed = 'move'
-                ev.dataTransfer.setData('text/plain', String(i))
-              },
-              onDragOver: ev => {
-                ev.preventDefault()
-                ev.dataTransfer.dropEffect = 'move'
-                setOver(i)
-              },
-              onDragLeave: () => setOver(v => (v === i ? null : v)),
-              onDrop: ev => {
-                ev.preventDefault()
-                ev.stopPropagation()
-                setOver(null)
-                if (dragIdx.current !== null) move(dragIdx.current, i)
-                dragIdx.current = null
-              },
-              onDragEnd: () => {
-                dragIdx.current = null
-                setOver(null)
-              },
-              className: 'flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-[5px] text-xs font-bold',
-              style: {
-                background: s.hex,
-                color: readableOn(s.hex),
-                // ring/scale inline: arbitrary shadow-[…] and scale-* are not
-                // in the app's frozen build CSS
-                boxShadow:
-                  'inset 0 0 0 1px rgba(128,128,128,0.45)' +
-                  (pickedHere === i || over === i ? ', 0 0 0 2px var(--ui-accent)' : ''),
-                transform: pickedHere === i || over === i ? 'scale(1.08)' : 'none',
-                transition: 'transform 0.1s ease',
-                scrollSnapAlign: 'start'
-              },
-              children: i + 1
+              className: 'flex shrink-0 flex-col items-center gap-0.5',
+              style: { scrollSnapAlign: 'start' },
+              children: [
+                jsx(
+                  'div',
+                  {
+                    role: 'button',
+                    tabIndex: 0,
+                    draggable: true,
+                    title:
+                      i === 0
+                        ? `#1 · background seed · ${s.hex}`
+                        : i === 1
+                          ? `#2 · text seed · ${s.hex}`
+                          : `#${i + 1} · ${s.hex}`,
+                    onClick: () => place(i),
+                    onDoubleClick: () => openWheel(i),
+                    onKeyDown: ev => {
+                      if (ev.key === 'Enter' || ev.key === ' ') {
+                        ev.preventDefault()
+                        place(i)
+                      }
+                    },
+                    onDragStart: ev => {
+                      dragIdx.current = i
+                      ev.dataTransfer.effectAllowed = 'move'
+                      ev.dataTransfer.setData('text/plain', String(i))
+                    },
+                    onDragOver: ev => {
+                      ev.preventDefault()
+                      ev.dataTransfer.dropEffect = 'move'
+                      setOver(i)
+                    },
+                    onDragLeave: () => setOver(v => (v === i ? null : v)),
+                    onDrop: ev => {
+                      ev.preventDefault()
+                      ev.stopPropagation()
+                      setOver(null)
+                      if (dragIdx.current !== null) move(dragIdx.current, i)
+                      dragIdx.current = null
+                    },
+                    onDragEnd: () => {
+                      dragIdx.current = null
+                      setOver(null)
+                    },
+                    className: 'flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-[5px] text-xs font-bold',
+                    style: {
+                      background: s.hex,
+                      color: readableOn(s.hex),
+                      // ring/scale inline: arbitrary shadow-[…] and scale-* are not
+                      // in the app's frozen build CSS
+                      boxShadow:
+                        'inset 0 0 0 1px rgba(128,128,128,0.45)' +
+                        (pickedHere === i || over === i ? ', 0 0 0 2px var(--ui-accent)' : ''),
+                      transform: pickedHere === i || over === i ? 'scale(1.08)' : 'none',
+                      transition: 'transform 0.1s ease'
+                    },
+                    children: i + 1
+                  },
+                  `sw-${i}`
+                ),
+                // Role captions: slot 1 seeds the background, slot 2 seeds the
+                // text color (UI + terminal). Fixed-height slot keeps the row
+                // aligned where no caption applies.
+                jsx('div', {
+                  className: 'h-3 text-center text-[0.5625rem] leading-none text-(--ui-text-quaternary)',
+                  'aria-hidden': true,
+                  children: i === 0 ? 'bkgnd' : i === 1 ? 'text' : ''
+                })
+              ]
             },
-            `sw-${i}`
+            `swc-${i}`
           )
         )
       }),
       wheelHere !== null && wheelHere < swatches.length
         ? jsx(ColorWheelPanel, {
             value: swatches[wheelHere].hex,
+            // Live preview: only update the swatch hex in memory so the wheel's
+            // own preview chip follows. Do NOT synthesize/save on every drag —
+            // that races with commit and bleaches the final color.
             onChange: hex => {
               const next = swatches.map((s, i) => (i === wheelHere ? { ...s, hex, hsl: hexToHsl(hex) } : s))
-              const theme = synthesize(next, entry)
-              updateTheme(entry.name, { swatches: next, theme })
+              updateTheme(entry.name, { swatches: next })
             },
             onCommit: hex => commitWheel(wheelHere, hex),
             onCancel: () => $wheelOpen.set(null)
@@ -849,14 +889,98 @@ function hslString(h, s, l) {
   return `hsl(${Math.round(((h % 1) + 1) % 1 * 360)}, ${Math.round(clamp01(s) * 100)}%, ${Math.round(clamp01(l) * 100)}%)`
 }
 
+// Curated fast-pick cells for the picker grid (standard picker behavior).
+const PRESET_CELLS = [
+  '#ffffff', '#f1f3f5', '#ced4da', '#868e96', '#495057', '#161616', '#000000',
+  '#fa5252', '#ff922b', '#fcc419', '#82c91e', '#37b24d', '#12b886', '#20c997',
+  '#22b8cf', '#339af0', '#1971c2', '#4c6ef5', '#7048e8', '#be4bdb', '#f06595', '#ff8787'
+]
+
+/** Strict hex parse: 3- or 6-digit (#abc / #aabbcc) → normalized 6-digit, else null. */
+const parseHexStrict = v => {
+  const c = String(v).trim().replace(/^#/, '')
+  if (/^[0-9a-f]{3}$/i.test(c)) return '#' + c.split('').map(x => x + x).join('')
+  if (/^[0-9a-f]{6}$/i.test(c)) return '#' + c.toLowerCase()
+  return null
+}
+
+function PickerSlider({ label, display, min, max, step, value, onChange, track }) {
+  return jsxs('div', {
+    className: 'flex items-center gap-1.5',
+    children: [
+      jsx('span', { className: 'w-4 shrink-0 text-[0.625rem] text-(--ui-text-quaternary)', children: label }),
+      jsx('input', {
+        type: 'range',
+        min,
+        max,
+        step,
+        value,
+        onChange: ev => onChange(Number(ev.target.value)),
+        className: 'h-1 min-w-0 flex-1',
+        style: { background: track, borderRadius: 999, accentColor: 'var(--ui-accent)' }
+      }),
+      jsx('span', {
+        className: 'shrink-0 text-[0.625rem] text-(--ui-text-tertiary)',
+        style: { width: 40, textAlign: 'right' },
+        children: display
+      })
+    ]
+  })
+}
+
 function ColorWheelPanel({ value, onChange, onCommit, onCancel }) {
   const base = hexToHsl(value) || { h: 0, s: 0.75, l: 0.5 }
   const [h, setH] = useState(base.h)
   const [s, setS] = useState(base.s)
   const [l, setL] = useState(base.l)
   const live = hslToHex(h, s, l)
+  const [hexDraft, setHexDraft] = useState(live.toUpperCase())
   const wheelRef = useRef(null)
   const dragging = useRef(null)
+
+  // Keep the hex field in sync with wheel/slider edits while you drag.
+  useEffect(() => setHexDraft(live.toUpperCase()), [live])
+
+  const hueDeg = Math.round(h * 360)
+  const satPct = Math.round(s * 100)
+  const liPct = Math.round(l * 100)
+
+  const pickFromScreen = async () => {
+    if (typeof window === 'undefined' || !('EyeDropper' in window)) {
+      host.notify({ kind: 'warning', message: 'Screen pick (eyedropper) is not supported in this build.' })
+      return
+    }
+    try {
+      const ed = new window.EyeDropper()
+      const res = await ed.open()
+      const hit = parseHexStrict(res.sRGBHex)
+      if (!hit) return
+      const hsl = hexToHsl(hit)
+      if (hsl) { setH(hsl.h); setS(hsl.s); setL(hsl.l) }
+    } catch (err) {
+      // AbortError = user pressed Escape to cancel; ignore.
+      if (!err || err.name !== 'AbortError') host.notify({ kind: 'warning', message: 'Screen pick failed.' })
+    }
+  }
+
+  const onHexInput = ev => {
+    const raw = ev.target.value
+    setHexDraft(raw)
+    const hit = parseHexStrict(raw)
+    if (!hit) return
+    const hsl = hexToHsl(hit)
+    if (hsl) { setH(hsl.h); setS(hsl.s); setL(hsl.l) }
+  }
+
+  const onHexBlur = () => setHexDraft(live.toUpperCase())
+
+  const pickCell = hex => {
+    const hsl = hexToHsl(hex)
+    if (!hsl) return
+    setH(hsl.h)
+    setS(hsl.s)
+    setL(hsl.l)
+  }
 
   const wheelFromPoint = (clientX, clientY) => {
     const rect = wheelRef.current?.getBoundingClientRect()
@@ -937,34 +1061,51 @@ function ColorWheelPanel({ value, onChange, onCommit, onCancel }) {
         ]
       }),
       jsxs('div', { className: 'flex min-w-0 flex-col gap-2', style: { flex: '1 1 100px' }, children: [
-        jsxs('div', { className: 'flex items-center gap-2', children: [
+        jsxs('div', { className: 'flex items-center gap-1.5', children: [
           jsx('div', {
             className: 'h-8 w-8 shrink-0 rounded-[4px]',
             style: { background: live, boxShadow: 'inset 0 0 0 1px rgba(128,128,128,0.45)' }
           }),
-          jsxs('div', { className: 'min-w-0', children: [
-            jsx('div', { className: 'truncate text-xs font-medium text-(--ui-text-primary)', children: live.toUpperCase() }),
-            jsx('div', { className: 'text-[0.625rem] text-(--ui-text-tertiary)', children: `${Math.round(h * 360)}° hue · ${Math.round(s * 100)}% sat · ${Math.round(l * 100)}% light` })
-          ] })
-        ] }),
-        jsxs('div', { className: 'flex flex-col gap-1', children: [
-          jsx('div', { className: 'text-[0.625rem] text-(--ui-text-quaternary)', children: 'Lightness' }),
-          jsx('input', {
-            type: 'range',
-            min: 0,
-            max: 1,
-            step: 0.005,
-            value: l,
-            onChange: ev => setL(Number(ev.target.value)),
-            className: 'h-1 w-full',
-            style: { background: `linear-gradient(to right, #000, ${live})`, borderRadius: 999, accentColor: 'var(--ui-accent)' }
+          jsx(Input, {
+            value: hexDraft,
+            onChange: onHexInput,
+            onBlur: onHexBlur,
+            onKeyDown: ev => {
+              if (ev.key === 'Enter') onCommit(live)
+              if (ev.key === 'Escape') onCancel()
+            },
+            className: 'h-6 min-w-0 flex-1 font-mono text-xs',
+            style: { width: 88 }
+          }),
+          jsx(Button, {
+            variant: 'ghost',
+            size: 'icon-xs',
+            title: 'Pick color from screen (eyedropper)',
+            onClick: pickFromScreen,
+            children: jsx(icons.Eye, { className: 'size-3.5' })
           })
         ] }),
+        jsx('div', { className: 'text-[0.625rem] text-(--ui-text-tertiary)', children: `${hueDeg}° hue · ${satPct}% sat · ${liPct}% light` }),
         jsxs('div', { className: 'flex items-center gap-1.5', children: [
           jsx(Button, { variant: 'secondary', size: 'xs', onClick: onCancel, children: 'Cancel' }),
           jsx(Button, { variant: 'primary', size: 'xs', onClick: () => onCommit(live), children: 'OK' })
         ] })
-      ] })
+      ] }),
+      // Full H/S/L slider set with gradient tracks (standard picker).
+      jsxs('div', { className: 'flex w-full min-w-0 flex-col gap-1', children: [
+        jsx(PickerSlider, { label: 'H', display: `${hueDeg}°`, min: 0, max: 360, step: 1, value: hueDeg, onChange: v => setH(v / 360), track: `linear-gradient(to right, ${[0, 60, 120, 180, 240, 300, 360].map(a => `hsl(${a},100%,50%)`).join(', ')})` }),
+        jsx(PickerSlider, { label: 'S', display: `${satPct}%`, min: 0, max: 100, step: 1, value: satPct, onChange: v => setS(v / 100), track: `linear-gradient(to right, hsl(${hueDeg},0%,${liPct}%), hsl(${hueDeg},100%,${liPct}%))` }),
+        jsx(PickerSlider, { label: 'L', display: `${liPct}%`, min: 0, max: 100, step: 1, value: liPct, onChange: v => setL(v / 100), track: `linear-gradient(to right, hsl(${hueDeg},${satPct}%,0%), hsl(${hueDeg},${satPct}%,50%), hsl(${hueDeg},${satPct}%,100%))` })
+      ] }),
+      // Clickable preset cells.
+      jsxs('div', { className: 'flex w-full min-w-0 flex-wrap gap-1', children: PRESET_CELLS.map(cell => jsx('button', {
+        type: 'button',
+        title: cell,
+        'aria-label': cell,
+        onClick: () => pickCell(cell),
+        className: 'h-3.5 w-3.5 shrink-0 cursor-pointer rounded-[3px]',
+        style: { background: cell, boxShadow: 'inset 0 0 0 1px rgba(128,128,128,0.45)' }
+      }, cell)) })
     ]
   })
 }

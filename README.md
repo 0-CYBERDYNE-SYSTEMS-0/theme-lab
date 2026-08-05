@@ -12,16 +12,19 @@ a photo, anything, and get a color-matched light + dark theme with a complete
 - **Image → theme in one drop.** Paste, drag-and-drop, or browse for an image.
   Median-cut palette extraction finds the dominant colors and maps them to
   every `DesktopTheme` token.
-- **WCAG-guaranteed.** Every generated theme passes contrast floors (body text
-  ≥ 7:1, muted ≥ 4.5:1, accents ≥ 3:1). Failing colors are nudged, not swapped —
-  your image's mood survives the fix.
+- **Your swatch, verbatim.** Slot 1 seeds the background, slot 2 seeds the
+  text color (UI + terminal), and the first chromatic swatch seeds the accent —
+  the exact color you place is the exact color that lands in the theme. No
+  contrast re-mixing, no blending: what you swap is what you get. (Secondary
+  tokens like muted text still get contrast-safe derivation.)
 - **Light + dark variants** per forge, plus a full 16-slot ANSI terminal palette
   (with correct near-background black/white behavior per background tone).
 - **Live everywhere.** Themes register via `THEMES_AREA` — they appear instantly
   in Settings → Appearance, ⌘K search, and `/skin`.
 - **Editing, not just generation.** Drag swatches to reorder priority (re-synthesizes
-  live), open the inline color wheel on any swatch, rename, reforge from the kept
-  source image, delete. A quiet strip view shows swatches only.
+  live), open the full color picker on any swatch — HSV wheel, H/S/L sliders,
+  editable hex field, preset color cells, and a screen eyedropper — rename,
+  reforge from the kept source image, delete. A quiet strip view shows swatches only.
 - **Survives restarts.** Themes persist in plugin storage with schema migration —
   v1 themes are auto-recovered (swatches rebuilt from tokens, thumbnails derived).
 - **Zero dependencies.** One plain-ESM file loaded uncompiled by the app. No build
@@ -55,7 +58,7 @@ To uninstall: delete `~/.hermes/desktop-plugins/theme-forge/`.
 The color math is validated by a standalone Node harness:
 
 ```bash
-node theme-forge/forge-math-test.cjs   # 41 checks — palette math, WCAG floors, ANSI mapping, migration
+node theme-forge/forge-math-test.cjs   # 74 checks — palette math, verbatim swatch→theme contract, ANSI mapping, picker wiring, migration
 ```
 
 Run it after touching anything in the `── color math ──` section of `plugin.js`.
