@@ -8,9 +8,20 @@
  * Model (all grounded in ~/.hermes/hermes-agent source, Aug 2026):
  *  - Concurrent per-profile sockets  → gateway.ts:9-16 (events tagged `profile`)
  *  - profile list                    → /api/profiles via window.hermesDesktop.api
+ *  - create profile                  → POST /api/profiles {name, clone_from}
  *  - mint a member session           → host.request('session.create', {profile,...})
  *  - inject into any session         → host.request('prompt.submit',{session_id,text})
  *  - hear a member's finished turn   → host.onEvent('assistant.completed', e) e.content
+ *
+ * QA hardening (Aug 2026):
+ *  - ALL top-level identifiers are hive-prefixed: the packaged runtime
+ *    evaluates plugin code in a scope where generic names collide with bundle
+ *    chunks (theme-forge died with "Identifier 'normalizeViewMode' has already
+ *    been declared"). Namespacing eliminates that class of load failure.
+ *  - Add-member popover renderOptions no longer closes over React state
+ *    setters it can't see (was a render-time ReferenceError).
+ *  - Profile list has a desktop-bridge path + manual-entry fallback, and a
+ *    "New profile…" create route (mirrors the app's CreateProfileDialog).
  *
  * Save as: ~/.hermes/desktop-plugins/buzz-hive/plugin.js
  * Plain ESM, loaded uncompiled — jsx() calls, not JSX syntax.
@@ -39,26 +50,26 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 // ── config ──────────────────────────────────────────────────────────────────
-const PLUGIN_ID = 'buzz-hive'
-const MAX_MEMBERS = 10 // profile members (You is extra, pinned)
-const DIGEST_LEN = 12
-const STORAGE_KEY = 'hive.v1'
+const HIVE_PLUGIN_ID = 'buzz-hive'
+const HIVE_MAX_MEMBERS = 10 // profile members (You is extra, pinned)
+const HIVE_DIGEST_LEN = 12
+const HIVE_STORAGE_KEY = 'hive.v1'
+const HIVE_PROFILE_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
 
 // ── reactive state ──────────────────────────────────────────────────────────
-const $members = atom([]) // { profile, sessionId, storedId, status, browser }
-const $timeline = atom([]) // { id, ts, from, kind:'user'|'agent'|'relay'|'system', text, to? }
-const $title = atom('hive')
-const $cwd = atom('')
-const $expanded = atom(null) // profile id with the "fresh context / remove" menu open
-const $composer = atom('')
-const $mentionOpen = atom('') // autocomplete filter when composing @name
+const $hiveMembers = atom([]) // { profile, sessionId, storedId, status, browser }
+const $hiveTimeline = atom([]) // { id, ts, from, kind:'user'|'agent'|'relay'|'system', text, to? }
+const $hiveTitle = atom('hive')
+const $hiveCwd = atom('')
+const $hiveComposer = atom('')
+const $hiveMentionOpen = atom('') // autocomplete filter when composing @name
 
 // module refs set in register()
-let storageRef = null
+let hiveStorageRef = null
 
 // ── create-CORE-BEGIN (pure functions; sliced verbatim by test.cjs) ────────
 
-const _normalize = (name) => ((name || '').trim() || 'default').toLowerCase()
+const hiveNormalize = (name) => ((name || '').trim() || 'default').toLowerCase()
 
 /**
  * Parse a member's finished output (or a user post) into coordination actions.
@@ -67,14 +78,15 @@ const _normalize = (name) => ((name || '').trim() || 'default').toLowerCase()
  *   [ask @name] text  → relay + flagged as a question
  *   [all] text        → broadcast (timeline + digest)
  *   [@name] text      → private relay to that member
- * Brackets in normal prose are rare; this is a structured protocol.
+ * Short form: [ask @x: question] — message inside the brackets is used when
+ * nothing follows the closing bracket.
  * Returns { relays:[{target,text,ask}], broadcast:string }.
  */
-function parseCoordination(content, roster) {
+function hiveParseCoordination(content, roster) {
   const result = { relays: [], broadcast: '' }
   const text = (content || '').trim()
   if (!text) return { relays: [], broadcast: text }
-  const rosterSet = new Set((roster || []).map(_normalize))
+  const rosterSet = new Set((roster || []).map(hiveNormalize))
   const TOKEN =
     /\[(?:to\s+@?([a-z0-9._-]+)|ask\s+@?([a-z0-9._-]+)|@([a-z0-9._-]+)|all)([^\]]*?)\]/gi
   const bcast = []
@@ -111,7 +123,7 @@ function parseCoordination(content, roster) {
 }
 
 /** Build the digest string from the timeline (latest DIGEST_LEN entries). */
-function buildDigest(timeline, n = DIGEST_LEN) {
+function hiveBuildDigest(timeline, n = HIVE_DIGEST_LEN) {
   const t = timeline || []
   const rows = t.slice(-n).map((msg) => {
     const who = typeof msg.from === 'string' ? msg.from : (msg.from || {}).profile || '?'
@@ -128,13 +140,13 @@ function buildDigest(timeline, n = DIGEST_LEN) {
  * Tells each agent who else is in the room, the grammar, and the current state.
  * `timeline` is passed in for pure/testable construction.
  */
-function buildRoomBrief(member, members, title, isBrowserAgent, timeline) {
+function hiveBuildRoomBrief(member, members, title, isBrowserAgent, timeline) {
   const roster = [...members, { profile: 'you' }]
-    .map((m) => '@' + _normalize(m.profile))
+    .map((m) => '@' + hiveNormalize(m.profile))
     .join(', ')
-  const digest = buildDigest(timeline, DIGEST_LEN)
+  const digest = hiveBuildDigest(timeline, HIVE_DIGEST_LEN)
   return (
-    `You are @${_normalize(member.profile)}, a member of the Hermes room "${title}".\n` +
+    `You are @${hiveNormalize(member.profile)}, a member of the Hermes room "${title}".\n` +
     `Roster (use ONLY these names to address members): ${roster}.\n` +
     (isBrowserAgent
       ? `You are the room's BROWSER AGENT. When live or current information is needed, use browser_navigate / browser_snapshot / browser_click / web_extract to fetch and verify it yourself.\n`
@@ -150,8 +162,8 @@ function buildRoomBrief(member, members, title, isBrowserAgent, timeline) {
 }
 
 /** Find bare `@name` roster mentions in a user post (composer shorthand). */
-function extractMentions(text, roster) {
-  const rosterSet = new Set((roster || []).map(_normalize))
+function hiveExtractMentions(text, roster) {
+  const rosterSet = new Set((roster || []).map(hiveNormalize))
   const found = []
   const re = /@([a-z0-9._-]+)/g
   let m
@@ -166,11 +178,11 @@ function extractMentions(text, roster) {
  * Route a user post: bracket directives win; otherwise bare @mentions target
  * members; otherwise broadcast to everyone.
  */
-function routeUserPost(text, members) {
+function hiveRouteUserPost(text, members) {
   const roster = (members || []).map((m) => m.profile)
-  const parsed = parseCoordination(text, roster)
+  const parsed = hiveParseCoordination(text, roster)
   if (parsed.relays.length) return parsed
-  const mentions = extractMentions(text, roster)
+  const mentions = hiveExtractMentions(text, roster)
   if (mentions.length) {
     const body = (text || '').replace(/@[a-z0-9._-]+/g, '').replace(/\s{2,}/g, ' ').trim()
     return {
@@ -181,12 +193,17 @@ function routeUserPost(text, members) {
   return parsed
 }
 
+/** Mirrors the app's CreateProfileDialog name validation. */
+function hiveIsValidProfileName(name) {
+  return HIVE_PROFILE_NAME_RE.test((name || '').trim())
+}
+
 // --CORE-END--
 
 /**
  * Status mapping from gateway events → member status.
  */
-function statusForEvent(e) {
+function hiveStatusForEvent(e) {
   const t = e && e.type
   if (t === 'assistant.delta' || t === 'message.delta' || t === 'thinking.delta') return 'streaming'
   if (t === 'assistant.completed') return 'done'
@@ -196,18 +213,23 @@ function statusForEvent(e) {
 
 // ── router / relay (side effects: host.request) ─────────────────────────────
 
-function memberBySession(sessionId, profile) {
-  const list = $members.get()
-  return list.find((m) => m.sessionId === sessionId || (profile && _normalize(m.profile) === _normalize(profile)))
+function hiveMemberBySession(sessionId, profile) {
+  const list = $hiveMembers.get()
+  return list.find(
+    (m) => m.sessionId === sessionId || (profile && hiveNormalize(m.profile) === hiveNormalize(profile))
+  )
 }
 
-async function deliverTo(member, text, opts = {}) {
+async function hiveDeliverTo(member, text, opts = {}) {
   if (!member || !member.sessionId) {
-    host.notify({ kind: 'warning', message: `Hive: ${member ? member.profile : 'member'} has no live session — forge it first.` })
+    host.notify({
+      kind: 'warning',
+      message: `Hive: @${member ? member.profile : '?'} has no live session — click it and choose "Fresh context", or re-add it.`
+    })
     return
   }
   const payload =
-    `[room digest]\n${buildDigest($timeline.get(), DIGEST_LEN)}\n\n` +
+    `[room digest]\n${hiveBuildDigest($hiveTimeline.get(), HIVE_DIGEST_LEN)}\n\n` +
     (opts.from ? `from @${opts.from}:\n` : '') +
     text
   const busy = member.status === 'streaming' || member.status === 'thinking'
@@ -222,70 +244,69 @@ async function deliverTo(member, text, opts = {}) {
   }
 }
 
-async function deliverToAll(text, opts) {
-  for (const m of $members.get()) await deliverTo(m, text, opts)
+async function hiveDeliverToAll(text, opts) {
+  for (const m of $hiveMembers.get()) await hiveDeliverTo(m, text, opts)
 }
 
 // last-relay echo guard: prevent A→B→A verbatim loops
-const _lastRelay = new Map() // profile -> last text delivered to them
-function guardEcho(target, text) {
-  const key = _normalize(target)
-  if (_lastRelay.get(key) === text) return false
-  _lastRelay.set(key, text)
+const _hiveLastRelay = new Map() // profile -> last text delivered to them
+function hiveGuardEcho(target, text) {
+  const key = hiveNormalize(target)
+  if (_hiveLastRelay.get(key) === text) return false
+  _hiveLastRelay.set(key, text)
   return true
 }
 
-function appendTimeline(msg) {
-  const t = $timeline.get()
-  $timeline.set([...t, { id: Math.random().toString(36).slice(2, 9), ts: Date.now(), ...msg }].slice(-200))
+function hiveAppendTimeline(msg) {
+  const t = $hiveTimeline.get()
+  $hiveTimeline.set([...t, { id: Math.random().toString(36).slice(2, 9), ts: Date.now(), ...msg }].slice(-200))
 }
 
-async function handleAssistantDone(e) {
-  const member = memberBySession(e.session_id, e.profile)
+async function hiveHandleAssistantDone(e) {
+  const member = hiveMemberBySession(e.session_id, e.profile)
   if (!member) return
   const content = (e.content || '').trim()
   if (!content) return
 
-  const parsed = parseCoordination(content, $members.get().map((m) => m.profile))
-  const from = _normalize(member.profile)
+  const parsed = hiveParseCoordination(content, $hiveMembers.get().map((m) => m.profile))
+  const from = hiveNormalize(member.profile)
 
   // Render the member's own message (markers stripped) in the timeline.
   const visible = [parsed.broadcast, ...parsed.relays.map((r) => r.text)].filter(Boolean).join(' ')
-  if (visible) appendTimeline({ from, kind: 'agent', text: visible, to: null })
+  if (visible) hiveAppendTimeline({ from, kind: 'agent', text: visible, to: null })
 
   // Relays to teammates.
   for (const r of parsed.relays) {
-    const target = $members.get().find((m) => _normalize(m.profile) === r.target)
-    if (!target || !guardEcho(r.target, r.text)) continue
-    appendTimeline({ from, kind: 'relay', text: r.text, to: r.target })
-    await deliverTo(target, r.text, { from })
+    const target = $hiveMembers.get().find((m) => hiveNormalize(m.profile) === r.target)
+    if (!target || !hiveGuardEcho(r.target, r.text)) continue
+    hiveAppendTimeline({ from, kind: 'relay', text: r.text, to: r.target })
+    await hiveDeliverTo(target, r.text, { from })
   }
 
   // Broadcast → digest.
   if (parsed.broadcast) {
-    // deliver broadcast to everyone so the room stays coherent
-    await deliverToAll(parsed.broadcast, { from })
+    await hiveDeliverToAll(parsed.broadcast, { from })
   }
 }
 
-function markStatus(sessionId, profile, status) {
-  const list = $members.get()
+function hiveMarkStatus(sessionId, profile, status) {
+  const list = $hiveMembers.get()
   const idx = list.findIndex(
-    (m) => m.sessionId === sessionId || (profile && _normalize(m.profile) === _normalize(profile))
+    (m) => m.sessionId === sessionId || (profile && hiveNormalize(m.profile) === hiveNormalize(profile))
   )
   if (idx !== -1 && list[idx].status !== status) {
     const next = list.slice()
     next[idx] = { ...next[idx], status }
-    $members.set(next)
+    $hiveMembers.set(next)
   }
 }
 
 // ── profile list + session management ───────────────────────────────────────
 
-async function fetchProfiles() {
+async function hiveFetchProfiles() {
   try {
     const api = window && window.hermesDesktop && window.hermesDesktop.api
-    if (!api) return []
+    if (!api) throw new Error('desktop bridge unavailable')
     const res = await api({ path: '/api/profiles' })
     return (res && res.profiles) || []
   } catch {
@@ -293,21 +314,37 @@ async function fetchProfiles() {
   }
 }
 
+/** Create a profile via the desktop bridge, mirroring the app's dialog. */
+async function hiveCreateProfile(name, cloneFrom, soul) {
+  const api = window && window.hermesDesktop && window.hermesDesktop.api
+  if (!api) throw new Error('Desktop bridge unavailable — create the profile in Settings → Profiles instead.')
+  const trimmed = (name || '').trim()
+  if (!hiveIsValidProfileName(trimmed)) {
+    throw new Error('Profile names: lowercase letters, digits, - and _ (start with a letter/digit).')
+  }
+  const res = await api({ path: '/api/profiles', method: 'POST', body: { name: trimmed, clone_from: cloneFrom } })
+  if (soul && soul.trim()) {
+    await api({ path: `/api/profiles/${encodeURIComponent(trimmed)}/soul`, method: 'PUT', body: { content: soul.trim() } })
+  }
+  return res
+}
+
 /** Mint a live session on a profile and seed it with the room brief. */
-async function mintMember(profile) {
-  const list = $members.get()
-  if (list.length >= MAX_MEMBERS) {
-    host.notify({ kind: 'warning', message: `Hive: room is full (${MAX_MEMBERS} members).` })
+async function hiveMintMember(profile) {
+  const list = $hiveMembers.get()
+  if (list.length >= HIVE_MAX_MEMBERS) {
+    host.notify({ kind: 'warning', message: `Hive: room is full (${HIVE_MAX_MEMBERS} members).` })
     return null
   }
-  const key = _normalize(profile)
-  if (list.some((m) => _normalize(m.profile) === key)) return list.find((m) => _normalize(m.profile) === key)
+  const key = hiveNormalize(profile)
+  const existing = list.find((m) => hiveNormalize(m.profile) === key)
+  if (existing) return existing
 
   const params = {
     cols: 96,
     source: 'desktop',
     profile: key,
-    ...($cwd.get() ? { cwd: $cwd.get() } : {})
+    ...($hiveCwd.get() ? { cwd: $hiveCwd.get() } : {})
   }
   try {
     const created = await host.request('session.create', params)
@@ -318,83 +355,82 @@ async function mintMember(profile) {
       status: 'idle',
       browser: false
     }
-    $members.set([...list, member])
-    const isBrowser = !$members.get().some((m) => m.browser)
-    if (isBrowser) {
-      member.browser = true
-      $members.set($members.get().map((m) => (m.profile === key ? member : m)))
+    $hiveMembers.set([...$hiveMembers.get(), member])
+    // First member holds the browser role by default.
+    if (!$hiveMembers.get().some((m) => m.browser)) {
+      $hiveMembers.set($hiveMembers.get().map((m) => (hiveNormalize(m.profile) === key ? { ...m, browser: true } : m)))
     }
-    await deliverTo(member, buildRoomBrief(member, $members.get(), $title.get(), member.browser, $timeline.get()), { system: true })
-    appendTimeline({ from: 'system', kind: 'system', text: `@${key} joined the room`, to: null })
-    persist()
-    return member
+    const current = $hiveMembers.get().find((m) => hiveNormalize(m.profile) === key)
+    await hiveDeliverTo(current, hiveBuildRoomBrief(current, $hiveMembers.get(), $hiveTitle.get(), current.browser, $hiveTimeline.get()), { system: true })
+    hiveAppendTimeline({ from: 'system', kind: 'system', text: `@${key} joined the room`, to: null })
+    hivePersist()
+    return current
   } catch (err) {
     host.notifyError(err, `Hive: couldn't start @${key}`)
     return null
   }
 }
 
-function removeMember(profile) {
-  $members.set($members.get().filter((m) => _normalize(m.profile) !== _normalize(profile)))
-  persist()
+function hiveRemoveMember(profile) {
+  $hiveMembers.set($hiveMembers.get().filter((m) => hiveNormalize(m.profile) !== hiveNormalize(profile)))
+  hivePersist()
 }
 
 /** Fresh context: mint a brand-new session for a member, re-seed the brief. */
-async function freshContext(profile) {
-  const key = _normalize(profile)
-  const old = $members.get().find((m) => _normalize(m.profile) === key)
-  if (old) $members.set($members.get().filter((m) => m !== old))
-  await mintMember(key)
+async function hiveFreshContext(profile) {
+  const key = hiveNormalize(profile)
+  $hiveMembers.set($hiveMembers.get().filter((m) => hiveNormalize(m.profile) !== key))
+  await hiveMintMember(key)
 }
 
-async function setBrowser(profile, on) {
-  const list = $members.get()
-  const key = _normalize(profile)
+async function hiveSetBrowser(profile, on) {
+  const list = $hiveMembers.get()
+  const key = hiveNormalize(profile)
   const next = list.map((m) =>
-    m.profile === key
+    hiveNormalize(m.profile) === key
       ? { ...m, browser: !!on }
       : on
         ? { ...m, browser: false } // single holder
         : m
   )
   // Re-seed the (new) holder + the demoted member with updated briefs.
-  $members.set(next)
-  const holder = next.find((m) => m.profile === key && m.browser)
-  const demoted = list.find((m) => m.browser && m.profile !== key)
-  if (holder) await deliverTo(holder, buildRoomBrief(holder, next, $title.get(), true, $timeline.get()), { system: true })
+  $hiveMembers.set(next)
+  const holder = next.find((m) => hiveNormalize(m.profile) === key && m.browser)
+  const demoted = list.find((m) => m.browser && hiveNormalize(m.profile) !== key)
+  if (holder) await hiveDeliverTo(holder, hiveBuildRoomBrief(holder, next, $hiveTitle.get(), true, $hiveTimeline.get()), { system: true })
   if (demoted && !demoted.browser) {
-    const fresh = next.find((m) => m.profile === demoted.profile)
-    if (fresh) await deliverTo(fresh, buildRoomBrief(fresh, next, $title.get(), false, $timeline.get()), { system: true })
+    const fresh = next.find((m) => hiveNormalize(m.profile) === hiveNormalize(demoted.profile))
+    if (fresh) await hiveDeliverTo(fresh, hiveBuildRoomBrief(fresh, next, $hiveTitle.get(), false, $hiveTimeline.get()), { system: true })
   }
-  persist()
+  hivePersist()
 }
 
 // ── persistence ─────────────────────────────────────────────────────────────
 
-function persist() {
-  if (!storageRef) return
+function hivePersist() {
+  if (!hiveStorageRef) return
   const data = {
-    title: $title.get(),
-    cwd: $cwd.get(),
-    members: $members
+    title: $hiveTitle.get(),
+    cwd: $hiveCwd.get(),
+    members: $hiveMembers
       .get()
       .map((m) => ({ profile: m.profile, storedId: m.storedId, browser: m.browser }))
   }
-  storageRef.set(STORAGE_KEY, data)
+  hiveStorageRef.set(HIVE_STORAGE_KEY, data)
 }
 
 /** Best-effort reconnect to stored sessions; detaches any that are gone. */
-async function bootHydrate() {
-  if (!storageRef) return
-  const saved = storageRef.get(STORAGE_KEY, null)
-  if (!saved || !Array.isArray(saved.members)) {
+async function hiveBootHydrate() {
+  if (!hiveStorageRef) return
+  const saved = hiveStorageRef.get(HIVE_STORAGE_KEY, null)
+  if (!saved || !Array.isArray(saved.members) || saved.members.length === 0) {
     // seed the default agent so the room has at least one working member
-    await mintMember('default')
-    persist()
+    await hiveMintMember('default')
+    hivePersist()
     return
   }
-  $title.set(saved.title || 'hive')
-  $cwd.set(saved.cwd || '')
+  $hiveTitle.set(saved.title || 'hive')
+  $hiveCwd.set(saved.cwd || '')
   const hydrated = []
   for (const m of saved.members) {
     const live = { profile: m.profile, storedId: m.storedId || null, browser: !!m.browser, status: 'idle', sessionId: null }
@@ -408,12 +444,12 @@ async function bootHydrate() {
     }
     hydrated.push(live)
   }
-  $members.set(hydrated)
+  $hiveMembers.set(hydrated)
 }
 
 // ── UI: pane ────────────────────────────────────────────────────────────────
 
-function RosterChip({ m }) {
+function HiveRosterChip({ m }) {
   const color = profileColor(m.profile)
   const statusTone =
     m.status === 'streaming' ? 'warn' : m.status === 'done' ? 'good' : m.status === 'error' ? 'bad' : 'muted'
@@ -424,6 +460,7 @@ function RosterChip({ m }) {
         children: jsx('div', {
           'data-role': 'member',
           style: { borderColor: color },
+          title: m.browser ? 'Browser agent' : m.status || 'idle',
           className: cn(
             'flex cursor-pointer items-center gap-1.5 rounded-lg border bg-background/60 px-2 py-1 text-xs select-none',
             m.browser && 'ring-1'
@@ -431,27 +468,29 @@ function RosterChip({ m }) {
           children: [
             jsx(StatusDot, { tone: statusTone }),
             jsx('span', { style: { color }, className: 'font-medium', children: '@' + m.profile }),
-            m.browser && jsx(icons.Globe, { size: 13, style: { color } })
+            m.browser && jsx(icons.Globe, { size: 13, style: { color } }),
+            m.status === 'streaming' &&
+              jsx('span', { className: 'text-[10px] text-muted-foreground', children: '…' })
           ]
         })
       }),
       jsx(DropdownMenuContent, {
         align: 'start',
         children: [
-          jsx(DropdownMenuItem, { onSelect: () => { void setBrowser(m.profile, !m.browser) }, children: m.browser ? 'Release browser control' : 'Grant browser control' }),
-          jsx(DropdownMenuItem, { onSelect: () => { void freshContext(m.profile) }, children: 'Fresh context (new session)' }),
-          jsx(DropdownMenuItem, { variant: 'destructive', onSelect: () => removeMember(m.profile), children: 'Remove from room' })
+          jsx(DropdownMenuItem, { onSelect: () => { void hiveSetBrowser(m.profile, !m.browser) }, children: m.browser ? 'Release browser control' : 'Grant browser control' }),
+          jsx(DropdownMenuItem, { onSelect: () => { void hiveFreshContext(m.profile) }, children: 'Fresh context (new session)' }),
+          jsx(DropdownMenuItem, { variant: 'destructive', onSelect: () => hiveRemoveMember(m.profile), children: 'Remove from room' })
         ]
       })
     ]
   })
 }
 
-function MemberTone({ t, from, to, text }) {
+function HiveMemberTone({ from, to, text }) {
   const color = from === 'you' ? null : profileColor(from)
-  const label = from === 'system' ? '·' : '@' + from + (to ? ' → @' + to : '')
+  const label = from === 'system' ? '· hive' : '@' + from + (to ? ' → @' + to : '')
   return jsx('div', {
-    className: 'group flex flex-col gap-0.5',
+    className: 'flex flex-col gap-0.5',
     children: [
       jsx('div', { className: 'flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-muted-foreground', children: [
         from !== 'system' && jsx('span', { style: color ? { color } : undefined, className: 'font-semibold', children: label }),
@@ -462,8 +501,8 @@ function MemberTone({ t, from, to, text }) {
   })
 }
 
-function Timeline() {
-  const timeline = useValue($timeline)
+function HiveTimeline() {
+  const timeline = useValue($hiveTimeline)
   const ref = useRef(null)
   useEffect(() => {
     const el = ref.current
@@ -476,16 +515,16 @@ function Timeline() {
       className: 'flex flex-col gap-2 p-2',
       'data-hive-timeline': true,
       children: timeline.length
-        ? timeline.map((m) => jsx(MemberTone, { key: m.id, t: m.t, from: m.from, to: m.to, text: m.text }))
+        ? timeline.map((m) => jsx(HiveMemberTone, { key: m.id, from: m.from, to: m.to, text: m.text }))
         : jsx('div', { className: 'p-4 text-center text-xs text-muted-foreground', children: 'Room is empty. Add profiles or message @default.' })
     })
   })
 }
 
-function Composer() {
-  const composer = useValue($composer)
-  const members = useValue($members)
-  const open = useValue($mentionOpen)
+function HiveComposer() {
+  const composer = useValue($hiveComposer)
+  const members = useValue($hiveMembers)
+  const open = useValue($hiveMentionOpen)
   const ref = useRef(null)
   const q = open.toLowerCase()
 
@@ -502,29 +541,29 @@ function Composer() {
     const raw = composer.trim()
     if (!raw) return
     haptic('tap')
-    $composer.set('')
-    $mentionOpen.set('')
-    const parsed = routeUserPost(raw, members)
+    $hiveComposer.set('')
+    $hiveMentionOpen.set('')
+    const parsed = hiveRouteUserPost(raw, members)
     if (parsed.relays.length) {
       for (const r of parsed.relays) {
-        const target = members.find((m) => _normalize(m.profile) === r.target)
+        const target = members.find((m) => hiveNormalize(m.profile) === r.target)
         if (target) {
-          appendTimeline({ from: 'you', kind: 'relay', text: r.text, to: r.target })
-          void deliverTo(target, r.text, { from: 'you' })
+          hiveAppendTimeline({ from: 'you', kind: 'relay', text: r.text, to: r.target })
+          void hiveDeliverTo(target, r.text, { from: 'you' })
         }
       }
     } else {
-      appendTimeline({ from: 'you', kind: 'user', text: parsed.broadcast, to: null })
-      void deliverToAll(parsed.broadcast, { from: 'you' })
+      hiveAppendTimeline({ from: 'you', kind: 'user', text: parsed.broadcast, to: null })
+      void hiveDeliverToAll(parsed.broadcast, { from: 'you' })
     }
-    persist()
+    hivePersist()
   }
 
   const onChange = (v) => {
-    $composer.set(v)
+    $hiveComposer.set(v)
     const toks = v.split(/\s+/)
     const last = toks[toks.length - 1] || ''
-    $mentionOpen.set(last.startsWith('@') ? last.slice(1) : '')
+    $hiveMentionOpen.set(last.startsWith('@') ? last.slice(1) : '')
   }
 
   return jsxs('div', {
@@ -541,10 +580,10 @@ function Composer() {
               variant: 'outline',
               size: 'sm',
               onClick: () => {
-                const toks = $composer.get().split(/\s+/)
+                const toks = $hiveComposer.get().split(/\s+/)
                 toks[toks.length - 1] = name + ' '
-                $composer.set(toks.join(' '))
-                $mentionOpen.set('')
+                $hiveComposer.set(toks.join(' '))
+                $hiveMentionOpen.set('')
                 ref.current?.focus?.()
               },
               children: name
@@ -571,102 +610,225 @@ function Composer() {
   })
 }
 
-function renderOptions(opts) {
-  return jsx('div', {
+/** Options list inside the Add-agent popover. Callbacks are passed in (no
+ *  stale-closure over React state that isn't in scope). */
+function HiveRenderOptions({ opts, onPick, onNew }) {
+  return jsxs('div', {
     className: 'flex flex-col gap-0.5 max-h-48 overflow-auto',
-    children: opts.length
-      ? opts.map((p) =>
-          jsx(Button, {
-            key: p.name,
-            variant: 'ghost',
-            size: 'sm',
-            className: 'justify-start text-xs',
-            onClick: () => {
-              void mintMember(p.name)
-              setOpen(false)
-              setQ('')
-            },
-            children: jsxs('div', { className: 'flex items-center gap-1.5', children: [
-              jsx('span', { style: { color: profileColor(p.name) }, children: '@' + p.name }),
-              jsx('span', { className: 'text-[10px] text-muted-foreground', children: p.model || 'no model' })
-            ] })
-          })
-        )
-      : jsx('div', { className: 'p-2 text-xs text-muted-foreground', children: 'No more profiles to add.' })
+    children: [
+      opts.length
+        ? opts.map((p) =>
+            jsx(Button, {
+              key: p.name,
+              variant: 'ghost',
+              size: 'sm',
+              className: 'justify-start text-xs',
+              onClick: () => onPick(p),
+              children: jsxs('div', { className: 'flex items-center gap-1.5', children: [
+                jsx('span', { style: { color: profileColor(p.name) }, children: '@' + p.name }),
+                jsx('span', { className: 'text-[10px] text-muted-foreground', children: p.model || 'no model' }),
+                p.skill_count > 0 && jsx('span', { className: 'text-[10px] text-muted-foreground', children: `${p.skill_count} skills` })
+              ] })
+            })
+          )
+        : jsx('div', { className: 'p-2 text-xs text-muted-foreground', children: 'Every profile is already in the room.' }),
+      jsx('div', { className: 'mt-1 border-t pt-1' }),
+      jsx(Button, { variant: 'ghost', size: 'sm', className: 'justify-start text-xs', onClick: onNew, children: jsxs('span', { children: [jsx(icons.Plus, { size: 13, className: 'inline mr-1' }), 'New profile…'] }) })
+    ]
   })
 }
 
-function AddMember() {
+/** Inline create-profile form (mirrors the app's CreateProfileDialog). */
+function HiveCreateForm({ onDone, onCancel }) {
+  const [name, setName] = useState('')
+  const [cloneFrom, setCloneFrom] = useState('default')
+  const [soul, setSoul] = useState('')
+  const [status, setStatus] = useState('idle') // idle | saving | done | error
+  const [error, setError] = useState('')
+  const trimmed = name.trim()
+  const invalid = trimmed !== '' && !hiveIsValidProfileName(trimmed)
+  const busy = status === 'saving' || status === 'done'
+
+  async function submit() {
+    if (!trimmed || invalid) {
+      setError(invalid ? 'Use lowercase letters, digits, - or _ (start letter/digit).' : 'Pick a name first.')
+      return
+    }
+    setStatus('saving')
+    setError('')
+    try {
+      await hiveCreateProfile(trimmed, cloneFrom || null, soul)
+      setStatus('done')
+      onDone(trimmed)
+    } catch (err) {
+      setStatus('error')
+      setError(err instanceof Error ? err.message : 'Create failed.')
+    }
+  }
+
+  return jsxs('div', {
+    className: 'flex flex-col gap-1.5 border-t p-2',
+    'data-hive-create': true,
+    children: [
+      jsx('div', { className: 'text-xs font-medium', children: 'New profile' }),
+      jsx(Input, {
+        autoFocus: true,
+        placeholder: 'profile-name',
+        value: name,
+        'aria-invalid': invalid,
+        onChange: (e) => setName(e.target.value),
+        className: 'text-xs'
+      }),
+      jsx(Input, {
+        placeholder: 'Clone from (default)',
+        value: cloneFrom,
+        onChange: (e) => setCloneFrom(e.target.value),
+        className: 'text-xs'
+      }),
+      jsx(Textarea, {
+        placeholder: 'Optional SOUL.md / persona (blank = clone untouched)',
+        value: soul,
+        rows: 2,
+        onChange: (e) => setSoul(e.target.value),
+        className: 'resize-none text-xs'
+      }),
+      error && jsx('div', { className: 'text-[11px] text-destructive', children: error }),
+      jsxs('div', { className: 'flex items-center justify-between', children: [
+        jsx(Button, { variant: 'ghost', size: 'sm', onClick: onCancel, disabled: busy, children: 'Cancel' }),
+        jsx(Button, { size: 'sm', onClick: () => void submit(), disabled: busy || !trimmed, children: status === 'saving' ? 'Creating…' : 'Create & join' })
+      ] })
+    ]
+  })
+}
+
+function HiveAddMember() {
   const [q, setQ] = useState('')
   const [profiles, setProfiles] = useState([])
   const [open, setOpen] = useState(false)
+  const [loadState, setLoadState] = useState('idle') // idle | loading | error
+  const [creating, setCreating] = useState(false)
+  const members = useValue($hiveMembers)
+  const present = new Set(members.map((m) => hiveNormalize(m.profile)).concat(['you']))
+  const opts = profiles
+    .filter((p) => !present.has(hiveNormalize(p.name)))
+    .filter((p) => p.name.toLowerCase().includes(q.toLowerCase()))
+    .slice(0, 8)
+
   const load = () => {
-    void fetchProfiles().then((p) => {
+    setLoadState('loading')
+    void hiveFetchProfiles().then((p) => {
       setProfiles(p)
+      setLoadState('idle')
+      if (p.length === 0) setLoadState('error')
       setOpen(true)
     })
   }
-  const members = useValue($members)
-  const present = new Set(members.map((m) => _normalize(m.profile)).concat(['you']))
-  const opts = profiles
-    .filter((p) => !present.has(_normalize(p.name)))
-    .filter((p) => p.name.toLowerCase().includes(q.toLowerCase()))
-    .slice(0, 8)
+
+  const pick = (p) => {
+    void hiveMintMember(p.name)
+    setOpen(false)
+    setQ('')
+  }
 
   return jsxs('div', {
     className: 'relative',
     children: [
       open &&
         jsxs('div', {
-          className: 'absolute z-20 right-0 top-9 w-56 rounded-lg border bg-background p-2 shadow-lg',
+          className: 'absolute z-20 right-0 top-9 w-64 rounded-lg border bg-background p-2 shadow-lg',
           children: [
-            jsx(Input, { autoFocus: true, placeholder: 'Search profiles…', value: q, onChange: (e) => setQ(e.target.value), className: 'mb-1.5 text-xs' }),
-            renderOptions(opts)
+            creating
+              ? jsx(HiveCreateForm, {
+                  onDone: (name) => {
+                    setCreating(false)
+                    setOpen(false)
+                    setQ('')
+                    void hiveMintMember(name)
+                    void hiveFetchProfiles().then(setProfiles)
+                  },
+                  onCancel: () => setCreating(false)
+                })
+              : jsxs('div', { className: 'flex flex-col gap-1.5', children: [
+                  jsx(Input, { autoFocus: true, placeholder: 'Search profiles…', value: q, onChange: (e) => setQ(e.target.value), className: 'mb-1 text-xs' }),
+                  loadState === 'error'
+                    ? jsx('div', { className: 'flex items-center justify-between p-1', children: [
+                        jsx('span', { className: 'text-[11px] text-muted-foreground', children: 'Couldn’t load profiles.' }),
+                        jsx(Button, { variant: 'ghost', size: 'sm', onClick: load, children: 'Retry' })
+                      ] })
+                    : jsx(HiveRenderOptions, { opts, onPick: pick, onNew: () => setCreating(true) })
+                ] })
           ]
         }),
-      jsx(Button, { variant: 'outline', size: 'sm', onClick: load, children: jsxs('span', { children: [jsx(icons.Plus, { size: 13, className: 'inline mr-1' }), 'Add agent'] }) })
+      jsx(Button, { variant: 'outline', size: 'sm', onClick: load, disabled: members.length >= HIVE_MAX_MEMBERS, children: jsxs('span', { children: [jsx(icons.Plus, { size: 13, className: 'inline mr-1' }), 'Add agent'] }) })
     ]
   })
 }
 
 function HivePane() {
-  const members = useValue($members)
-  const title = useValue($title)
+  const members = useValue($hiveMembers)
+  const title = useValue($hiveTitle)
+  const [editingTitle, setEditingTitle] = useState(false)
+  const [titleDraft, setTitleDraft] = useState(title)
+
+  const commitTitle = () => {
+    if (titleDraft.trim()) {
+      $hiveTitle.set(titleDraft.trim().slice(0, 40))
+      hivePersist()
+    }
+    setEditingTitle(false)
+  }
+
   return jsxs('div', {
     'data-hive-pane': true,
     className: 'flex h-full flex-col bg-background',
     style: { minHeight: 0 },
     children: [
-      jsxs('div', { className: 'flex items-center justify-between border-b px-3 py-2', children: [
-        jsxs('div', { className: 'flex items-center gap-2', children: [
+      jsxs('div', { className: 'flex items-center justify-between gap-2 border-b px-3 py-2', children: [
+        jsxs('div', { className: 'flex items-center gap-2 min-w-0', children: [
           jsx('span', { className: 'text-sm font-semibold', children: 'Hive' }),
-          jsx(Badge, { variant: 'secondary', children: title }),
-          jsx(Badge, { variant: 'outline', children: members.length + '/10' })
+          editingTitle
+            ? jsx(Input, {
+                autoFocus: true,
+                value: titleDraft,
+                className: 'h-6 w-24 text-xs',
+                onChange: (e) => setTitleDraft(e.target.value),
+                onBlur: commitTitle,
+                onKeyDown: (ev) => { if (ev.key === 'Enter') commitTitle() }
+              })
+            : jsx(Badge, { variant: 'secondary', className: 'cursor-pointer', onClick: () => { setTitleDraft(title); setEditingTitle(true) }, title: 'Rename room', children: title }),
+          jsx(Badge, { variant: 'outline', children: members.length + 1 + '/11' })
         ] }),
-        jsx(AddMember, {})
+        jsx(HiveAddMember, {})
       ] }),
-      jsx('div', { className: 'flex flex-col gap-1.5 p-2 border-b', children: members.map((m) => jsx(RosterChip, { key: m.profile, m })) }),
-      jsx(Timeline, {}),
-      jsx(Composer, {})
+      jsx('div', { className: 'flex flex-col gap-1.5 p-2 border-b', 'data-hive-roster': true, children: [
+        jsx('div', { className: 'flex items-center gap-1.5 rounded-lg border px-2 py-1 text-xs select-none opacity-80', 'data-role': 'you', children: [
+          jsx(StatusDot, { tone: 'good' }),
+          jsx('span', { className: 'font-medium', children: '@you' }),
+          jsx('span', { className: 'text-[10px] text-muted-foreground', children: 'you' })
+        ] }),
+        members.map((m) => jsx(HiveRosterChip, { key: m.profile, m }))
+      ] }),
+      jsx(HiveTimeline, {}),
+      jsx(HiveComposer, {})
     ]
   })
 }
 
 // ── register ────────────────────────────────────────────────────────────────
 export default {
-  id: PLUGIN_ID,
+  id: HIVE_PLUGIN_ID,
   name: 'Buzz-Hive',
 
   register(ctx) {
-    storageRef = ctx.storage
+    hiveStorageRef = ctx.storage
 
     // Migration guard: ensure we're reading a consistent v1 shape.
-    const raw = ctx.storage.get(STORAGE_KEY, null)
+    const raw = ctx.storage.get(HIVE_STORAGE_KEY, null)
     if (raw && (!raw.members || !Array.isArray(raw.members))) {
-      ctx.storage.set(STORAGE_KEY, { title: 'hive', cwd: '', members: [] })
+      ctx.storage.set(HIVE_STORAGE_KEY, { title: 'hive', cwd: '', members: [] })
     }
 
-    void bootHydrate()
+    void hiveBootHydrate()
 
     const disposers = []
 
@@ -694,12 +856,12 @@ export default {
     )
 
     disposers.push(host.onEvent('assistant.completed', (e) => {
-      markStatus(e.session_id, e.profile, 'done')
-      void handleAssistantDone(e)
+      hiveMarkStatus(e.session_id, e.profile, 'done')
+      void hiveHandleAssistantDone(e)
     }))
-    disposers.push(host.onEvent('assistant.delta', (e) => markStatus(e.session_id, e.profile, 'streaming')))
-    disposers.push(host.onEvent('message.delta', (e) => markStatus(e.session_id, e.profile, 'streaming')))
-    disposers.push(host.onEvent('thinking.delta', (e) => markStatus(e.session_id, e.profile, 'streaming')))
+    disposers.push(host.onEvent('assistant.delta', (e) => hiveMarkStatus(e.session_id, e.profile, 'streaming')))
+    disposers.push(host.onEvent('message.delta', (e) => hiveMarkStatus(e.session_id, e.profile, 'streaming')))
+    disposers.push(host.onEvent('thinking.delta', (e) => hiveMarkStatus(e.session_id, e.profile, 'streaming')))
 
     ctx.onDispose(() => {
       disposers.forEach((d) => {
