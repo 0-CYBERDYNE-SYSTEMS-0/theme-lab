@@ -527,6 +527,7 @@ function HiveRosterChip({ m }) {
   const color = profileColor(m.profile)
   const statusTone =
     m.status === 'streaming' ? 'warn' : m.status === 'done' ? 'good' : m.status === 'error' ? 'bad' : 'muted'
+  const sessionRef = m.storedId || m.sessionId || undefined
   return jsx(DropdownMenu, {
     children: [
       jsx(DropdownMenuTrigger, {
@@ -534,7 +535,9 @@ function HiveRosterChip({ m }) {
         children: jsx('div', {
           'data-role': 'member',
           style: { borderColor: color },
-          title: m.browser ? 'Browser agent' : m.status || 'idle',
+          title: m.browser
+            ? `Browser agent · session: ${sessionRef || 'pending'}`
+            : `Session: ${sessionRef || 'pending'}`,
           className: cn(
             'flex cursor-pointer items-center gap-1.5 rounded-lg border bg-background/60 px-2 py-1 text-xs select-none',
             m.browser && 'ring-1'
@@ -551,6 +554,11 @@ function HiveRosterChip({ m }) {
       jsx(DropdownMenuContent, {
         align: 'start',
         children: [
+          sessionRef &&
+            jsx(DropdownMenuItem, {
+              onSelect: () => { host.navigate('/' + encodeURIComponent(sessionRef)) },
+              children: jsxs('span', { children: ['Open session', jsx('span', { className: 'ml-2 text-[10px] text-muted-foreground', children: sessionRef.slice(0, 12) + '…' })] })
+            }),
           jsx(DropdownMenuItem, { onSelect: () => { void hiveSetBrowser(m.profile, !m.browser) }, children: m.browser ? 'Release browser control' : 'Grant browser control' }),
           jsx(DropdownMenuItem, { onSelect: () => { void hiveFreshContext(m.profile) }, children: 'Fresh context (new session)' }),
           jsx(DropdownMenuItem, { variant: 'destructive', onSelect: () => hiveRemoveMember(m.profile), children: 'Remove from room' })
