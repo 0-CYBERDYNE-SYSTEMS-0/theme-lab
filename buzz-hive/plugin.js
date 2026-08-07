@@ -69,6 +69,9 @@ const $hiveStreams = atom({})
 // Completion dedup: map sessionId -> timestamp of last processed completion,
 // so message.complete and assistant.completed for the same turn fire once.
 const _hiveProcessed = new Map()
+// Profiles whose first turn is the seeded room brief — that acknowledgment
+// turn is suppressed from the timeline (context is kept, noise isn't).
+const _hiveSeeded = new Map()
 
 // module refs set in register()
 let hiveStorageRef = null
@@ -311,6 +314,12 @@ async function hiveHandleAssistantDone(e, content) {
   hiveStreamClear(member.profile)
   hiveMarkStatus(e.session_id, e.profile, 'done')
 
+  // The seeded room-brief acknowledgment turn: keep the context, skip the noise.
+  if (_hiveSeeded.get(hiveNormalize(member.profile))) {
+    _hiveSeeded.delete(hiveNormalize(member.profile))
+    return
+  }
+
   const finalText = (content || '').trim()
   if (!finalText) return
 
@@ -419,6 +428,7 @@ async function hiveMintMember(profile) {
       $hiveMembers.set($hiveMembers.get().map((m) => (hiveNormalize(m.profile) === key ? { ...m, browser: true } : m)))
     }
     const current = $hiveMembers.get().find((m) => hiveNormalize(m.profile) === key)
+    _hiveSeeded.set(key, true) // suppress the brief-ack turn from the timeline
     await hiveDeliverTo(current, hiveBuildRoomBrief(current, $hiveMembers.get(), $hiveTitle.get(), current.browser, $hiveTimeline.get()), { system: true })
     hiveAppendTimeline({ from: 'system', kind: 'system', text: `@${key} joined the room`, to: null })
     hivePersist()
@@ -455,10 +465,16 @@ async function hiveSetBrowser(profile, on) {
   $hiveMembers.set(next)
   const holder = next.find((m) => hiveNormalize(m.profile) === key && m.browser)
   const demoted = list.find((m) => m.browser && hiveNormalize(m.profile) !== key)
-  if (holder) await hiveDeliverTo(holder, hiveBuildRoomBrief(holder, next, $hiveTitle.get(), true, $hiveTimeline.get()), { system: true })
+  if (holder) {
+    _hiveSeeded.set(hiveNormalize(holder.profile), true)
+    await hiveDeliverTo(holder, hiveBuildRoomBrief(holder, next, $hiveTitle.get(), true, $hiveTimeline.get()), { system: true })
+  }
   if (demoted && !demoted.browser) {
     const fresh = next.find((m) => hiveNormalize(m.profile) === hiveNormalize(demoted.profile))
-    if (fresh) await hiveDeliverTo(fresh, hiveBuildRoomBrief(fresh, next, $hiveTitle.get(), false, $hiveTimeline.get()), { system: true })
+    if (fresh) {
+      _hiveSeeded.set(hiveNormalize(fresh.profile), true)
+      await hiveDeliverTo(fresh, hiveBuildRoomBrief(fresh, next, $hiveTitle.get(), false, $hiveTimeline.get()), { system: true })
+    }
   }
   hivePersist()
 }
