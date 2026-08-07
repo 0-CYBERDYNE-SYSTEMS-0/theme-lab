@@ -116,10 +116,12 @@ const bgD = themeD.darkColors.background
 check('slot1-ctrl: bright seed lands bg VERBATIM', bgD.toLowerCase() === mk(255, 224, 196, 5000).hex.toLowerCase(), `${bgD} vs seed`)
 
 // ── Slot-2 foreground control (regression: was always luminance-extreme derived) ──
-// Use distinct swatches so hue swaps are observable.
+// Use distinct swatches so hue swaps are observable. Background is a realistic
+// dark (deepBlue) so the contrast floor is a no-op and the verbatim carry-through
+// is visible. (A dedicated floor test below checks the disaster case.)
 const softPink = mk(230, 150, 160, 1200)
 const skyBlue = mk(120, 180, 255, 1100)
-const slot2Base = [teal, softPink, skyBlue, mk(255, 120, 50, 3000), mk(120, 30, 80, 2000)]
+const slot2Base = [deepBlue, softPink, skyBlue, mk(255, 120, 50, 3000), mk(120, 30, 80, 2000)]
 const themeFG1 = synthesize(slot2Base, { name: 'x', label: 'x', mode: 'dark' })
 const themeFG2 = synthesize([...slot2Base.slice(0, 1), skyBlue, softPink, ...slot2Base.slice(3)], { name: 'x', label: 'x', mode: 'dark' })
 check('slot2-ctrl: swapping slot 2 changes dark fg hue', hueDist(rgbToHsl(...hexToRgb(themeFG1.darkColors.foreground)).h, rgbToHsl(...hexToRgb(themeFG2.darkColors.foreground)).h) > 15, `fg1=${themeFG1.darkColors.foreground} fg2=${themeFG2.darkColors.foreground}`)
@@ -153,6 +155,34 @@ check('slot2-ctrl: light seed fg VERBATIM', lightSeedFGResult.toLowerCase() === 
 
 // Single-swatch fallback derives a usable fg (different from bg).
 check('slot2-ctrl: single swatch still derives fg', typeof themeSingle.darkColors.foreground === 'string' && themeSingle.darkColors.foreground.toLowerCase() !== themeSingle.darkColors.background.toLowerCase(), themeSingle.darkColors.foreground)
+
+// ── Contrast floor (tripwire) ───────────────────────────────────────────────
+// The disaster the floor exists for: near-black bg + near-black text must be
+// nudged to a readable ratio, while a deliberately readable pair stays verbatim.
+const FLOOR = 3
+const nearBlackBg = mk(8, 8, 10, 5000)      // ~#08080a
+const nearBlackFg = mk(12, 12, 14, 2000)    // ~#0c0c0e  (contrast ~1.1:1 on bg)
+const floorTheme = synthesize([nearBlackBg, nearBlackFg], { name: 'floor', label: 'floor', mode: 'dark' })
+const floorFG = floorTheme.darkColors.foreground
+check('floor: near-black text is nudged readable (>= 3:1)', contrast(floorFG, floorTheme.darkColors.background) >= FLOOR, `fg=${floorFG} ratio=${contrast(floorFG, floorTheme.darkColors.background).toFixed(2)}`)
+check('floor: nudged fg is NOT the original (actually changed)', floorFG.toLowerCase() !== nearBlackFg.hex.toLowerCase(), `${floorFG} vs ${nearBlackFg.hex}`)
+check('floor: nudged fg is a valid hex', /^#[0-9a-f]{6}$/i.test(floorFG))
+check('floor: terminal fg follows same floor', contrast(floorTheme.darkTerminal.foreground, floorTheme.darkColors.background) >= FLOOR, `term=${floorTheme.darkTerminal.foreground}`)
+
+// Opposite polarity: near-white bg + near-white text must nudge toward dark.
+const nearWhiteBg = mk(250, 250, 252, 5000)
+const nearWhiteFg = mk(248, 248, 250, 2000)
+const floorLight = synthesize([nearWhiteBg, nearWhiteFg], { name: 'floor', label: 'floor', mode: 'light' })
+const floorLightFG = floorLight.colors.foreground
+check('floor: near-white light-mode text nudged readable (>= 3:1)', contrast(floorLightFG, floorLight.colors.background) >= FLOOR, `fg=${floorLightFG} ratio=${contrast(floorLightFG, floorLight.colors.background).toFixed(2)}`)
+
+// A genuinely readable pair passes through untouched (verbatim preserved).
+// softPink on deepBlue is ~5.8:1 (> 3) so the floor is a no-op.
+const readableFG = themeFG1.darkColors.foreground
+check('floor: readable pair stays VERBATIM (floor is no-op)', readableFG.toLowerCase() === softPink.hex.toLowerCase(), `${readableFG} vs ${softPink.hex}`)
+
+// Dark-mode bright seed on dark bg stays verbatim too (no over-nudge to pure white).
+check('floor: light seed fg VERBATIM on dark bg', lightSeedFGResult.toLowerCase() === lightSeedFG.hex.toLowerCase(), `${lightSeedFGResult} vs ${lightSeedFG.hex}`)
 
 // ── Plugin behavior probes ────────────────────────────────────────────────
 const pluginPath = process.env.HOME + '/.hermes/desktop-plugins/theme-forge/plugin.js'
@@ -234,7 +264,7 @@ check('commit: commitWheel writes exact hex to swatch', pluginSrc.includes('cons
 check('commit: commitWheel synthesizes from that exact swatch', pluginSrc.includes('const theme = synthesize(next, entry)'))
 check('commit: slot-1 bg is verbatim (no blend)', pluginSrc.includes('const background = seed.hex'))
 check('commit: slot-2 text is verbatim (no blend)', pluginSrc.includes('foreground = ordered[1].hex'))
-check('commit: terminal text is verbatim', pluginSrc.includes('foreground: fgSeed ? fgSeed : readableOn(bg)'))
+check('commit: terminal text is verbatim (floor only trips on unreadable)', pluginSrc.includes('foreground: fgSeed ? ensureContrast(fgSeed, bg, FORGE_TEXT_FLOOR) : readableOn(bg)'))
 check('commit: accent is verbatim', pluginSrc.includes('const accentSafe = accentRaw.hex'))
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} FAILURES`)
