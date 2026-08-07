@@ -291,3 +291,47 @@ useValue — all present).
    confirm no error toast.
 3. Live smoke (user-run, needs a configured second profile): add profile →
    forge session → type `@default test` → confirm relay + reply in timeline.
+
+---
+
+## 9. QA pass (Aug 7, 2026)
+
+### Bugs found and fixed
+- **renderOptions stale-closure bug (critical, would crash):** `HiveRenderOptions`
+  was a module-level function referencing `setOpen`/`setQ` — React state
+  setters only in scope inside `AddMember`. Clicking any profile row in the
+  Add-agent popover would throw `ReferenceError`. Fixed by passing callbacks as
+  props.
+- **Identifier collision risk (load-blocker):** The packaged app's runtime
+  evaluates plugin blobs in a scope where generic top-level identifiers collide
+  with bundle chunks — theme-forge died with `SyntaxError: Identifier
+  'normalizeViewMode' has already been declared`. All top-level identifiers in
+  buzz-hive are now `hive`-prefixed (154 occurrences). Confirmed clean: no load
+  failures logged for buzz-hive; live sessions minted + briefs delivered at 01:36.
+
+### Features added
+- **Create-profile route:** "New profile…" row in the Add-agent popover opens an
+  inline form (name, clone-from, optional SOUL). Mirrors the app's
+  `CreateProfileDialog` (`POST /api/profiles {name, clone_from}`, optional
+  `PUT /api/profiles/{name}/soul`). Name validation `/^[a-z0-9][a-z0-9_-]{0,63}$/`
+  (same as app). New profile auto-joins the room.
+- **You chip:** Pinned "You" member rendered at top of roster with `@you` label
+  and StatusDot.
+- **Room title rename:** click the title badge to edit inline.
+- **Error states:** Add-agent popover shows "Couldn't load profiles" + Retry on
+  fetch failure; empty state when all profiles are in the room.
+- **Profile info in add list:** shows model + skill count per row.
+
+### Live verification (logged)
+- `~/.hermes/logs/agent.log` shows two live sessions minted by the plugin
+  (default + audio-mixer) with room briefs delivered:
+  `msg='[room digest] @system: @default joined the room  You are @audio-mixer, a member ...'`
+  → full critical path (session.create → prompt.submit → brief → agent turn).
+- 24 profiles exist on this machine (agency-*, closer, cofounder,
+  frontier-savant*, …) — Add-agent list will be populated.
+- No `runtime load failed (buzz-hive)` in any log = clean load.
+- **Visual confirmation blocked** by broken vision backend (Gemini 404) — the
+  one remaining item for TD's eyeball.
+
+### Not testable without vision
+Pane rendered appearance; toast appearance; @-autocomplete popover position.
