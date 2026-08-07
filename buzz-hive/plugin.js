@@ -63,6 +63,12 @@ const $hiveTitle = atom('hive')
 const $hiveCwd = atom('')
 const $hiveComposer = atom('')
 const $hiveMentionOpen = atom('') // autocomplete filter when composing @name
+// Live per-member stream buffers for in-flight feedback:
+//   { [profile]: { text: string, tool: string } }  — text = accumulated deltas
+const $hiveStreams = atom({})
+// Completion dedup: map sessionId -> timestamp of last processed completion,
+// so message.complete and assistant.completed for the same turn fire once.
+const _hiveProcessed = new Map()
 
 // module refs set in register()
 let hiveStorageRef = null
@@ -262,13 +268,53 @@ function hiveAppendTimeline(msg) {
   $hiveTimeline.set([...t, { id: Math.random().toString(36).slice(2, 9), ts: Date.now(), ...msg }].slice(-200))
 }
 
-async function hiveHandleAssistantDone(e) {
+/** Reset a member's live stream buffer (turn start). */
+function hiveStreamReset(profile) {
+  const s = $hiveStreams.get()
+  $hiveStreams.set({ ...s, [hiveNormalize(profile)]: { text: '', tool: '' } })
+}
+
+/** Append an incremental delta chunk to a member's live buffer. */
+function hiveStreamAppend(profile, text) {
+  const key = hiveNormalize(profile)
+  const s = $hiveStreams.get()
+  $hiveStreams.set({ ...s, [key]: { ...(s[key] || { text: '', tool: '' }), text: (s[key]?.text || '') + (text || '') } })
+}
+
+function hiveStreamSetTool(profile, tool) {
+  const key = hiveNormalize(profile)
+  const s = $hiveStreams.get()
+  $hiveStreams.set({ ...s, [key]: { ...(s[key] || { text: '', tool: '' }), tool: tool || '' } })
+}
+
+function hiveStreamClear(profile) {
+  const key = hiveNormalize(profile)
+  const s = $hiveStreams.get()
+  if (!(key in s)) return
+  const next = { ...s }
+  delete next[key]
+  $hiveStreams.set(next)
+}
+
+/** Process a member's finished turn: render, relay, broadcast. `content` is the
+ *  final accumulated text; dedup guards the same turn arriving on both
+ *  message.complete and assistant.completed. */
+async function hiveHandleAssistantDone(e, content) {
   const member = hiveMemberBySession(e.session_id, e.profile)
   if (!member) return
-  const content = (e.content || '').trim()
-  if (!content) return
 
-  const parsed = hiveParseCoordination(content, $hiveMembers.get().map((m) => m.profile))
+  const now = Date.now()
+  const last = _hiveProcessed.get(e.session_id) || 0
+  if (now - last < 1500) return // already processed this turn
+  _hiveProcessed.set(e.session_id, now)
+
+  hiveStreamClear(member.profile)
+  hiveMarkStatus(e.session_id, e.profile, 'done')
+
+  const finalText = (content || '').trim()
+  if (!finalText) return
+
+  const parsed = hiveParseCoordination(finalText, $hiveMembers.get().map((m) => m.profile))
   const from = hiveNormalize(member.profile)
 
   // Render the member's own message (markers stripped) in the timeline.
@@ -287,6 +333,18 @@ async function hiveHandleAssistantDone(e) {
   if (parsed.broadcast) {
     await hiveDeliverToAll(parsed.broadcast, { from })
   }
+}
+
+/** Fallback completion signal (some surfaces emit assistant.completed instead
+ *  of message.complete). Uses the accumulated buffer when the payload has no
+ *  content. */
+async function hiveHandleFallbackCompleted(e) {
+  const member = hiveMemberBySession(e.session_id, e.profile)
+  if (!member) return
+  const buffered = $hiveStreams.get()[hiveNormalize(member.profile)]?.text || ''
+  const content = (e.content || '').trim() || buffered
+  if (!content) return
+  await hiveHandleAssistantDone(e, content)
 }
 
 function hiveMarkStatus(sessionId, profile, status) {
@@ -501,6 +559,31 @@ function HiveMemberTone({ from, to, text }) {
   })
 }
 
+function HiveLiveRow() {
+  const streams = useValue($hiveStreams)
+  const members = useValue($hiveMembers)
+  const active = members.filter((m) => m.status === 'streaming')
+  if (active.length === 0) return null
+  return jsx('div', {
+    className: 'flex flex-col gap-1 px-2 pb-1',
+    'data-hive-live': true,
+    children: active.map((m) => {
+      const s = streams[hiveNormalize(m.profile)] || { text: '', tool: '' }
+      const color = profileColor(m.profile)
+      const preview = s.text.trim().replace(/\s+/g, ' ').slice(0, 180)
+      return jsx('div', {
+        key: m.profile,
+        className: 'flex items-start gap-1.5 rounded-md border border-dashed px-2 py-1.5 text-xs',
+        children: [
+          jsx('span', { style: { color }, className: 'shrink-0 font-semibold', children: '@' + m.profile }),
+          jsx('span', { className: 'hive-dots shrink-0 animate-pulse text-muted-foreground', children: '•••' }),
+          jsx('span', { className: 'min-w-0 flex-1 truncate text-muted-foreground', children: preview || (s.tool ? `using ${s.tool}…` : 'thinking…') })
+        ]
+      })
+    })
+  })
+}
+
 function HiveTimeline() {
   const timeline = useValue($hiveTimeline)
   const ref = useRef(null)
@@ -514,9 +597,12 @@ function HiveTimeline() {
     children: jsx('div', {
       className: 'flex flex-col gap-2 p-2',
       'data-hive-timeline': true,
-      children: timeline.length
-        ? timeline.map((m) => jsx(HiveMemberTone, { key: m.id, from: m.from, to: m.to, text: m.text }))
-        : jsx('div', { className: 'p-4 text-center text-xs text-muted-foreground', children: 'Room is empty. Add profiles or message @default.' })
+      children: [
+        ...(timeline.length
+          ? timeline.map((m) => jsx(HiveMemberTone, { key: m.id, from: m.from, to: m.to, text: m.text }))
+          : [jsx('div', { key: 'empty', className: 'p-4 text-center text-xs text-muted-foreground', children: 'Room is empty. Add profiles or message @default.' })]),
+        jsx(HiveLiveRow, { key: 'live' })
+      ]
     })
   })
 }
@@ -549,11 +635,18 @@ function HiveComposer() {
         const target = members.find((m) => hiveNormalize(m.profile) === r.target)
         if (target) {
           hiveAppendTimeline({ from: 'you', kind: 'relay', text: r.text, to: r.target })
+          // Instant feedback: mark the target streaming before message.start lands.
+          hiveMarkStatus(target.sessionId, target.profile, 'streaming')
+          hiveStreamReset(target.profile)
           void hiveDeliverTo(target, r.text, { from: 'you' })
         }
       }
     } else {
       hiveAppendTimeline({ from: 'you', kind: 'user', text: parsed.broadcast, to: null })
+      for (const m of members) {
+        hiveMarkStatus(m.sessionId, m.profile, 'streaming')
+        hiveStreamReset(m.profile)
+      }
       void hiveDeliverToAll(parsed.broadcast, { from: 'you' })
     }
     hivePersist()
@@ -855,13 +948,36 @@ export default {
       })
     )
 
-    disposers.push(host.onEvent('assistant.completed', (e) => {
-      hiveMarkStatus(e.session_id, e.profile, 'done')
-      void hiveHandleAssistantDone(e)
+    disposers.push(host.onEvent('message.start', (e) => {
+      const m = hiveMemberBySession(e.session_id, e.profile)
+      if (!m) return
+      console.log(`[buzz-hive] turn start @${m.profile} session=${e.session_id}`)
+      hiveStreamReset(m.profile)
+      hiveMarkStatus(e.session_id, e.profile, 'streaming')
     }))
-    disposers.push(host.onEvent('assistant.delta', (e) => hiveMarkStatus(e.session_id, e.profile, 'streaming')))
-    disposers.push(host.onEvent('message.delta', (e) => hiveMarkStatus(e.session_id, e.profile, 'streaming')))
+    disposers.push(host.onEvent('message.delta', (e) => {
+      const m = hiveMemberBySession(e.session_id, e.profile)
+      if (!m) return
+      hiveStreamAppend(m.profile, (e.payload && e.payload.text) || '')
+      hiveMarkStatus(e.session_id, e.profile, 'streaming')
+    }))
     disposers.push(host.onEvent('thinking.delta', (e) => hiveMarkStatus(e.session_id, e.profile, 'streaming')))
+    disposers.push(host.onEvent('reasoning.delta', (e) => hiveMarkStatus(e.session_id, e.profile, 'streaming')))
+    disposers.push(host.onEvent('tool.start', (e) => {
+      const m = hiveMemberBySession(e.session_id, e.profile)
+      if (!m) return
+      hiveMarkStatus(e.session_id, e.profile, 'streaming')
+      hiveStreamSetTool(m.profile, (e.payload && (e.payload.tool || e.payload.name)) || '')
+    }))
+    disposers.push(host.onEvent('message.complete', (e) => {
+      // Accumulated deltas are the source of truth for the final text.
+      const m = hiveMemberBySession(e.session_id, e.profile)
+      if (!m) return
+      const buffered = $hiveStreams.get()[hiveNormalize(m.profile)]?.text || ''
+      console.log(`[buzz-hive] turn complete @${m.profile} chars=${buffered.length}`)
+      void hiveHandleAssistantDone(e, buffered)
+    }))
+    disposers.push(host.onEvent('assistant.completed', hiveHandleFallbackCompleted))
 
     ctx.onDispose(() => {
       disposers.forEach((d) => {
