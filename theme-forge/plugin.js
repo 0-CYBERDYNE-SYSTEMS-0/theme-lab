@@ -151,6 +151,18 @@ const ensureContrast = (color, bg, min) => {
   return readableOn(bg)
 }
 
+/**
+ * Tripwire floor for the verbatim foreground (slot-2) color. WCAG body-text
+ * target is 4.5:1, but the user's whole point of a verbatim slot-2 is to place
+ * an exact accent/text color — so the floor is deliberately the LARGE-TEXT bar
+ * (3:1), a "you can't read this at all" tripwire, not a readability rule.
+ * ensureContrast is a no-op above it, so readable low-contrast accents pass
+ * through untouched; only a near-black-on-near-black hard illegibility nudges
+ * toward the correct polarity just enough to clear the bar. Keeps creative
+ * freedom while guaranteeing the theme is never literally unreadable.
+ */
+const FORGE_TEXT_FLOOR = 3
+
 function rgbToHsl(r, g, b) {
   r /= 255
   g /= 255
@@ -314,8 +326,9 @@ function ansiPalette(ordered, bg, fgSeed) {
 
   return {
     // Terminal body text follows the slot-2 swatch VERBATIM — the exact color
-    // the user places is the exact terminal foreground. No contrast re-mix.
-    foreground: fgSeed ? fgSeed : readableOn(bg),
+    // the user places is the terminal foreground. Tripwire floor applies: a
+    // no-op above FORGE_TEXT_FLOOR, nudges only when the pair is unreadable.
+    foreground: fgSeed ? ensureContrast(fgSeed, bg, FORGE_TEXT_FLOOR) : readableOn(bg),
     cursor: tune(pick(150, 260, 0), 0.2),
     selectionBackground: darkBg ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.14)',
     black,
@@ -355,11 +368,18 @@ function buildColorsFromPalette(ordered, wantDark) {
   const background = seed.hex
 
   // Foreground: slot 2 IS the foreground/text color, VERBATIM. No lightness
-  // guidance, no contrast mix: the exact color the user places in slot 2 is
-  // the exact text color the theme uses (UI + terminal). This is the fix for
-  // "swapped swatches and text never visibly changed" — the old code blended
-  // every slot-2 seed toward near-white/near-black for contrast, so the swap
-  // never showed THAT color.
+  // guidance: the exact color the user places in slot 2 is the starting text
+  // color (UI + terminal). This is the fix for "swapped swatches and text
+  // never visibly changed" — the old code blended every slot-2 seed toward
+  // near-white/near-black for contrast, so the swap never showed THAT color.
+  //
+  // Tripwire floor (below): the verbatim contract is preserved UNLESS the pair
+  // is genuinely unreadable (near-black text on a near-black bg). ensureContrast
+  // is a no-op above the floor, so deliberate, readable low-contrast choices
+  // pass through untouched — freedom kept. Only a hard illegibility (contrast
+  // < FORGE_TEXT_FLOOR) nudges toward the correct polarity, just enough to clear
+  // the floor. This is the backstop the user asked for after landing on a
+  // super-dark, unreadable theme.
   let foreground
   if (ordered.length >= 2) {
     foreground = ordered[1].hex
@@ -372,6 +392,7 @@ function buildColorsFromPalette(ordered, wantDark) {
       if (luminance(foreground) > 0.35) foreground = mix(foreground, '#060608', 0.7)
     }
   }
+  foreground = ensureContrast(foreground, background, FORGE_TEXT_FLOOR)
 
   const accentSafe = accentRaw.hex
   const card = wantDark ? mix(background, '#ffffff', 0.045) : mix(background, '#000000', 0.015)
