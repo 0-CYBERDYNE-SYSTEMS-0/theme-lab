@@ -621,6 +621,59 @@ function forgeApplyLive(entry) {
     })
 }
 
+// ── escape hatch (theme-immune) ─────────────────────────────────────────────
+// A broken theme (super-dark bg + dark text) makes the pane's theme-var text
+// illegible. This button is the ONE thing that must survive any theme, so it
+// deliberately uses HARDCODED colors and a fixed glow — never theme vars. It
+// resets to the safe default via the gateway (config.set skin=default →
+// skin.changed → desktop setTheme('default') → repaints to the canonical
+// 'nous' theme). No navigation, no Settings, fully reversible: the user's
+// forged themes stay saved in the pane.
+function forgeResetToDefault() {
+  host.request('config.set', { key: 'skin', value: 'default' })
+    .then(() => {
+      haptic('tap')
+      $forgeActiveSkin.set('default')
+      host.notify({ kind: 'success', message: 'Reset to the safe default theme.' })
+    })
+    .catch(err => host.notifyError(err, 'Theme Forge reset'))
+}
+
+function forgeEscapeHatch() {
+  return jsx('button', {
+    type: 'button',
+    onClick: forgeResetToDefault,
+    title: 'Always visible — reset to the safe default theme if this one is unreadable',
+    'aria-label': 'Reset to safe default theme',
+    // Hardcoded, theme-independent: high-contrast amber-on-dark that reads
+    // against ANY background (light or dark, any palette). boxShadow rings
+    // are inline because arbitrary shadow-[…] classes are frozen-CSS dead.
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      width: '100%',
+      padding: '6px 10px',
+      borderRadius: 6,
+      fontSize: 12,
+      fontWeight: 700,
+      lineHeight: 1.2,
+      color: '#111111',
+      background: 'linear-gradient(135deg, #ffb300 0%, #ff8f00 100%)',
+      border: '1px solid #6d4c00',
+      boxShadow: '0 0 0 1px rgba(0,0,0,0.35), 0 0 10px rgba(255,179,0,0.55)',
+      cursor: 'pointer',
+      flexShrink: 0,
+      userSelect: 'none'
+    },
+    children: [
+      jsx(icons.AlertTriangle, { className: 'size-3.5 shrink-0', style: { color: '#111111' } }),
+      jsx('span', { children: 'Reset to safe theme' })
+    ]
+  })
+}
+
 function StripRow({ entry, onOpen, active }) {
   const theme = entry.theme || {}
   const t = theme.darkTerminal || theme.terminal || {}
@@ -1319,6 +1372,10 @@ function ForgePane() {
     onDragOver: ev => ev.preventDefault(),
     onDrop,
     children: [
+      // Pinned escape hatch: always visible, never scrolled away, and immune
+      // to the theme's own colors (hardcoded) so it works even under a
+      // broken/unreadable theme.
+      jsx(forgeEscapeHatch, {}, 'forge-escape'),
       jsxs('div', {
         className: 'flex min-w-0 flex-wrap items-center justify-between gap-2',
         children: [
