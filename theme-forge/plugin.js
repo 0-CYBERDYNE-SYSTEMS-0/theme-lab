@@ -50,6 +50,54 @@ function normalizeViewMode(v) {
 
 const $wheelOpen = atom(null) // { slug, index } — single inline color editor
 
+// ── active-skin detection ──────────────────────────────────────────────────
+// The app paints the active theme's slug onto <html data-hermes-theme="…">
+// (themes/context.tsx applyTheme). Reading it + a MutationObserver gives the
+// pane a live "which theme is applied" signal so we can light the active card
+// and pin it to the top of the list.
+const $forgeActiveSkin = atom(null)
+
+function forgeReadActiveSkin() {
+  if (typeof window === 'undefined' || !document.documentElement) return null
+  return document.documentElement.dataset.hermesTheme || null
+}
+
+let forgeSkinObserver = null
+function forgeEnsureSkinObserver() {
+  if (forgeSkinObserver || typeof window === 'undefined') return
+  forgeSkinObserver = new MutationObserver(() => {
+    const v = forgeReadActiveSkin()
+    if (v !== $forgeActiveSkin.get()) $forgeActiveSkin.set(v)
+  })
+  forgeSkinObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-hermes-theme'] })
+  $forgeActiveSkin.set(forgeReadActiveSkin())
+}
+
+function forgeUseActiveSkin() {
+  const v = useValue($forgeActiveSkin)
+  useEffect(() => {
+    forgeEnsureSkinObserver()
+  }, [])
+  return v
+}
+
+/** Small indicator dot: lit when this theme is the one currently applied. */
+function forgeActiveDot({ active }) {
+  return jsx('span', {
+    title: active ? 'Currently applied' : 'Not applied',
+    'aria-hidden': true,
+    style: {
+      width: 8,
+      height: 8,
+      borderRadius: 999,
+      flexShrink: 0,
+      background: active ? 'var(--ui-accent)' : 'var(--ui-stroke-secondary)',
+      boxShadow: active ? '0 0 6px var(--ui-accent)' : 'none',
+      transition: 'background 0.15s ease, box-shadow 0.15s ease'
+    }
+  })
+}
+
 // ── color math ──────────────────────────────────────────────────────────────
 
 const rgbToHex = (r, g, b) =>
@@ -535,11 +583,45 @@ function reforge(entry) {
 }
 
 function applyTheme(entry) {
+  // Forge themes are contributed to the DESKTOP registry only — the backend
+  // can't resolve them, so config.set would silently fall back to `default`.
+  // Deep-link those. Backend-known skins (built-ins) apply LIVE below.
+  if (forgeIsBackendSkin(entry.name)) {
+    forgeApplyLive(entry)
+    return
+  }
   host.navigate('/settings?tab=config:appearance')
   host.notify({ kind: 'info', message: `Click "${entry.label}" in the grid to apply.` })
 }
 
-function StripRow({ entry, onOpen }) {
+// Backend-known skins: the gateway's `config.set display.skin=<name>` RPC
+// broadcasts skin.changed, which the desktop drains through setTheme → the
+// theme repaints WITHOUT navigating away from this pane. Names from
+// hermes_cli/skin_engine.py _BUILTIN_SKINS (verified in the app source).
+const forgeBackendSkins = new Set([
+  'default', 'ares', 'mono', 'slate', 'daylight', 'warm-lightmode',
+  'poseidon', 'sisyphus', 'charizard'
+])
+
+function forgeIsBackendSkin(name) {
+  return Boolean(name) && forgeBackendSkins.has(name)
+}
+
+function forgeApplyLive(entry) {
+  host.request('config.set', { key: 'skin', value: entry.name })
+    .then(() => {
+      haptic('tap')
+      host.notify({ kind: 'success', message: `"${entry.label}" applied live.` })
+    })
+    .catch(err => {
+      host.notifyError(err, 'Theme Forge apply')
+      // Fall back to the honest path if the gateway can't take it.
+      host.navigate('/settings?tab=config:appearance')
+      host.notify({ kind: 'info', message: `Click "${entry.label}" in the grid to apply.` })
+    })
+}
+
+function StripRow({ entry, onOpen, active }) {
   const theme = entry.theme || {}
   const t = theme.darkTerminal || theme.terminal || {}
   const colors = theme.darkColors || theme.colors || {}
@@ -571,6 +653,7 @@ function StripRow({ entry, onOpen }) {
       'hover:bg-(--chrome-action-hover) active:bg-(--chrome-active-hover)'
     ),
     children: [
+      jsx(forgeActiveDot, { active }),
       thumb,
       jsx('div', {
         className: 'min-w-0 flex-1 truncate text-[0.6875rem] text-(--ui-text-tertiary)',
@@ -1110,7 +1193,7 @@ function ColorWheelPanel({ value, onChange, onCommit, onCancel }) {
   })
 }
 
-function ThemeCard({ entry }) {
+function ThemeCard({ entry, active }) {
   const expanded = useValue($expanded) === entry.name
   const editing = useValue($editing) === entry.name
   const mode = useValue($mode)
@@ -1139,6 +1222,7 @@ function ThemeCard({ entry }) {
       jsxs('div', {
         className: 'flex min-w-0 flex-wrap items-center gap-1',
         children: [
+          jsx(forgeActiveDot, { active }),
           jsx(ThemeThumb, { entry }),
           editing
             ? jsxs('div', { className: 'flex min-w-0 flex-1 items-center gap-1', children: [
@@ -1201,6 +1285,16 @@ function ForgePane() {
   const generated = useValue($generated)
   const mode = useValue($mode)
   const viewMode = useValue($viewMode)
+  const activeSkin = forgeUseActiveSkin()
+
+  // Pin the currently-applied theme to the top so it's always visible for
+  // quick customization; the indicator dot marks it. Rest keeps its order.
+  const list = (() => {
+    if (!activeSkin) return generated
+    const active = generated.find(e => e.name === activeSkin)
+    if (!active) return generated
+    return [active, ...generated.filter(e => e.name !== activeSkin)]
+  })()
 
   const onDrop = ev => {
     ev.preventDefault()
@@ -1276,11 +1370,11 @@ function ForgePane() {
             className: 'min-h-0 flex-1',
             children: jsx('div', {
               className: viewMode === 'strip' ? 'flex min-w-0 flex-col gap-px' : 'flex min-w-0 flex-col gap-2 pb-2',
-              children: generated.length
-                ? generated.map(entry =>
+              children: list.length
+                ? list.map(entry =>
                     viewMode === 'strip'
-                      ? jsx(StripRow, { entry, onOpen: () => openCard(entry) })
-                      : jsx(ThemeCard, { entry }, entry.name)
+                      ? jsx(StripRow, { entry, active: entry.name === activeSkin, onOpen: () => openCard(entry) })
+                      : jsx(ThemeCard, { entry, active: entry.name === activeSkin }, entry.name)
                   )
                 : jsx('div', { className: 'py-2 text-xs text-(--ui-text-tertiary)', children: 'None yet — forge one above.' })
             })
@@ -1368,6 +1462,10 @@ export default {
     ctx.onDispose(() => {
       if (pasteHandler) window.removeEventListener('paste', pasteHandler, true)
       pasteHandler = null
+      if (forgeSkinObserver) {
+        forgeSkinObserver.disconnect()
+        forgeSkinObserver = null
+      }
       disposersBySlug.forEach(d => d())
       disposersBySlug.clear()
     })
