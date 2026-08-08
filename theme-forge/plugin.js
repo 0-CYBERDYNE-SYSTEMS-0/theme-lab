@@ -50,6 +50,54 @@ function normalizeViewMode(v) {
 
 const $wheelOpen = atom(null) // { slug, index } — single inline color editor
 
+// ── active-skin detection ──────────────────────────────────────────────────
+// The app paints the active theme's slug onto <html data-hermes-theme="…">
+// (themes/context.tsx applyTheme). Reading it + a MutationObserver gives the
+// pane a live "which theme is applied" signal so we can light the active card
+// and pin it to the top of the list.
+const $forgeActiveSkin = atom(null)
+
+function forgeReadActiveSkin() {
+  if (typeof window === 'undefined' || !document.documentElement) return null
+  return document.documentElement.dataset.hermesTheme || null
+}
+
+let forgeSkinObserver = null
+function forgeEnsureSkinObserver() {
+  if (forgeSkinObserver || typeof window === 'undefined') return
+  forgeSkinObserver = new MutationObserver(() => {
+    const v = forgeReadActiveSkin()
+    if (v !== $forgeActiveSkin.get()) $forgeActiveSkin.set(v)
+  })
+  forgeSkinObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-hermes-theme'] })
+  $forgeActiveSkin.set(forgeReadActiveSkin())
+}
+
+function forgeUseActiveSkin() {
+  const v = useValue($forgeActiveSkin)
+  useEffect(() => {
+    forgeEnsureSkinObserver()
+  }, [])
+  return v
+}
+
+/** Small indicator dot: lit when this theme is the one currently applied. */
+function forgeActiveDot({ active }) {
+  return jsx('span', {
+    title: active ? 'Currently applied' : 'Not applied',
+    'aria-hidden': true,
+    style: {
+      width: 8,
+      height: 8,
+      borderRadius: 999,
+      flexShrink: 0,
+      background: active ? 'var(--ui-accent)' : 'var(--ui-stroke-secondary)',
+      boxShadow: active ? '0 0 6px var(--ui-accent)' : 'none',
+      transition: 'background 0.15s ease, box-shadow 0.15s ease'
+    }
+  })
+}
+
 // ── color math ──────────────────────────────────────────────────────────────
 
 const rgbToHex = (r, g, b) =>
@@ -102,6 +150,18 @@ const ensureContrast = (color, bg, min) => {
   }
   return readableOn(bg)
 }
+
+/**
+ * Tripwire floor for the verbatim foreground (slot-2) color. WCAG body-text
+ * target is 4.5:1, but the user's whole point of a verbatim slot-2 is to place
+ * an exact accent/text color — so the floor is deliberately the LARGE-TEXT bar
+ * (3:1), a "you can't read this at all" tripwire, not a readability rule.
+ * ensureContrast is a no-op above it, so readable low-contrast accents pass
+ * through untouched; only a near-black-on-near-black hard illegibility nudges
+ * toward the correct polarity just enough to clear the bar. Keeps creative
+ * freedom while guaranteeing the theme is never literally unreadable.
+ */
+const FORGE_TEXT_FLOOR = 3
 
 function rgbToHsl(r, g, b) {
   r /= 255
@@ -266,8 +326,9 @@ function ansiPalette(ordered, bg, fgSeed) {
 
   return {
     // Terminal body text follows the slot-2 swatch VERBATIM — the exact color
-    // the user places is the exact terminal foreground. No contrast re-mix.
-    foreground: fgSeed ? fgSeed : readableOn(bg),
+    // the user places is the terminal foreground. Tripwire floor applies: a
+    // no-op above FORGE_TEXT_FLOOR, nudges only when the pair is unreadable.
+    foreground: fgSeed ? ensureContrast(fgSeed, bg, FORGE_TEXT_FLOOR) : readableOn(bg),
     cursor: tune(pick(150, 260, 0), 0.2),
     selectionBackground: darkBg ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.14)',
     black,
@@ -307,11 +368,18 @@ function buildColorsFromPalette(ordered, wantDark) {
   const background = seed.hex
 
   // Foreground: slot 2 IS the foreground/text color, VERBATIM. No lightness
-  // guidance, no contrast mix: the exact color the user places in slot 2 is
-  // the exact text color the theme uses (UI + terminal). This is the fix for
-  // "swapped swatches and text never visibly changed" — the old code blended
-  // every slot-2 seed toward near-white/near-black for contrast, so the swap
-  // never showed THAT color.
+  // guidance: the exact color the user places in slot 2 is the starting text
+  // color (UI + terminal). This is the fix for "swapped swatches and text
+  // never visibly changed" — the old code blended every slot-2 seed toward
+  // near-white/near-black for contrast, so the swap never showed THAT color.
+  //
+  // Tripwire floor (below): the verbatim contract is preserved UNLESS the pair
+  // is genuinely unreadable (near-black text on a near-black bg). ensureContrast
+  // is a no-op above the floor, so deliberate, readable low-contrast choices
+  // pass through untouched — freedom kept. Only a hard illegibility (contrast
+  // < FORGE_TEXT_FLOOR) nudges toward the correct polarity, just enough to clear
+  // the floor. This is the backstop the user asked for after landing on a
+  // super-dark, unreadable theme.
   let foreground
   if (ordered.length >= 2) {
     foreground = ordered[1].hex
@@ -324,6 +392,7 @@ function buildColorsFromPalette(ordered, wantDark) {
       if (luminance(foreground) > 0.35) foreground = mix(foreground, '#060608', 0.7)
     }
   }
+  foreground = ensureContrast(foreground, background, FORGE_TEXT_FLOOR)
 
   const accentSafe = accentRaw.hex
   const card = wantDark ? mix(background, '#ffffff', 0.045) : mix(background, '#000000', 0.015)
@@ -535,11 +604,98 @@ function reforge(entry) {
 }
 
 function applyTheme(entry) {
+  // Forge themes are contributed to the DESKTOP registry only — the backend
+  // can't resolve them, so config.set would silently fall back to `default`.
+  // Deep-link those. Backend-known skins (built-ins) apply LIVE below.
+  if (forgeIsBackendSkin(entry.name)) {
+    forgeApplyLive(entry)
+    return
+  }
   host.navigate('/settings?tab=config:appearance')
   host.notify({ kind: 'info', message: `Click "${entry.label}" in the grid to apply.` })
 }
 
-function StripRow({ entry, onOpen }) {
+// Backend-known skins: the gateway's `config.set display.skin=<name>` RPC
+// broadcasts skin.changed, which the desktop drains through setTheme → the
+// theme repaints WITHOUT navigating away from this pane. Names from
+// hermes_cli/skin_engine.py _BUILTIN_SKINS (verified in the app source).
+const forgeBackendSkins = new Set([
+  'default', 'ares', 'mono', 'slate', 'daylight', 'warm-lightmode',
+  'poseidon', 'sisyphus', 'charizard'
+])
+
+function forgeIsBackendSkin(name) {
+  return Boolean(name) && forgeBackendSkins.has(name)
+}
+
+function forgeApplyLive(entry) {
+  host.request('config.set', { key: 'skin', value: entry.name })
+    .then(() => {
+      haptic('tap')
+      host.notify({ kind: 'success', message: `"${entry.label}" applied live.` })
+    })
+    .catch(err => {
+      host.notifyError(err, 'Theme Forge apply')
+      // Fall back to the honest path if the gateway can't take it.
+      host.navigate('/settings?tab=config:appearance')
+      host.notify({ kind: 'info', message: `Click "${entry.label}" in the grid to apply.` })
+    })
+}
+
+// ── escape hatch (theme-immune) ─────────────────────────────────────────────
+// A broken theme (super-dark bg + dark text) makes the pane's theme-var text
+// illegible. This button is the ONE thing that must survive any theme, so it
+// deliberately uses HARDCODED colors and a fixed glow — never theme vars. It
+// resets to the safe default via the gateway (config.set skin=default →
+// skin.changed → desktop setTheme('default') → repaints to the canonical
+// 'nous' theme). No navigation, no Settings, fully reversible: the user's
+// forged themes stay saved in the pane.
+function forgeResetToDefault() {
+  host.request('config.set', { key: 'skin', value: 'default' })
+    .then(() => {
+      haptic('tap')
+      $forgeActiveSkin.set('default')
+      host.notify({ kind: 'success', message: 'Reset to the safe default theme.' })
+    })
+    .catch(err => host.notifyError(err, 'Theme Forge reset'))
+}
+
+function forgeEscapeHatch() {
+  return jsx('button', {
+    type: 'button',
+    onClick: forgeResetToDefault,
+    title: 'Always visible — reset to the safe default theme if this one is unreadable',
+    'aria-label': 'Reset to safe default theme',
+    // Hardcoded, theme-independent: high-contrast amber-on-dark that reads
+    // against ANY background (light or dark, any palette). boxShadow rings
+    // are inline because arbitrary shadow-[…] classes are frozen-CSS dead.
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      width: '100%',
+      padding: '6px 10px',
+      borderRadius: 6,
+      fontSize: 12,
+      fontWeight: 700,
+      lineHeight: 1.2,
+      color: '#111111',
+      background: 'linear-gradient(135deg, #ffb300 0%, #ff8f00 100%)',
+      border: '1px solid #6d4c00',
+      boxShadow: '0 0 0 1px rgba(0,0,0,0.35), 0 0 10px rgba(255,179,0,0.55)',
+      cursor: 'pointer',
+      flexShrink: 0,
+      userSelect: 'none'
+    },
+    children: [
+      jsx(icons.AlertTriangle, { className: 'size-3.5 shrink-0', style: { color: '#111111' } }),
+      jsx('span', { children: 'Reset to safe theme' })
+    ]
+  })
+}
+
+function StripRow({ entry, onOpen, active }) {
   const theme = entry.theme || {}
   const t = theme.darkTerminal || theme.terminal || {}
   const colors = theme.darkColors || theme.colors || {}
@@ -571,6 +727,7 @@ function StripRow({ entry, onOpen }) {
       'hover:bg-(--chrome-action-hover) active:bg-(--chrome-active-hover)'
     ),
     children: [
+      jsx(forgeActiveDot, { active }),
       thumb,
       jsx('div', {
         className: 'min-w-0 flex-1 truncate text-[0.6875rem] text-(--ui-text-tertiary)',
@@ -1110,7 +1267,7 @@ function ColorWheelPanel({ value, onChange, onCommit, onCancel }) {
   })
 }
 
-function ThemeCard({ entry }) {
+function ThemeCard({ entry, active }) {
   const expanded = useValue($expanded) === entry.name
   const editing = useValue($editing) === entry.name
   const mode = useValue($mode)
@@ -1139,6 +1296,7 @@ function ThemeCard({ entry }) {
       jsxs('div', {
         className: 'flex min-w-0 flex-wrap items-center gap-1',
         children: [
+          jsx(forgeActiveDot, { active }),
           jsx(ThemeThumb, { entry }),
           editing
             ? jsxs('div', { className: 'flex min-w-0 flex-1 items-center gap-1', children: [
@@ -1201,6 +1359,16 @@ function ForgePane() {
   const generated = useValue($generated)
   const mode = useValue($mode)
   const viewMode = useValue($viewMode)
+  const activeSkin = forgeUseActiveSkin()
+
+  // Pin the currently-applied theme to the top so it's always visible for
+  // quick customization; the indicator dot marks it. Rest keeps its order.
+  const list = (() => {
+    if (!activeSkin) return generated
+    const active = generated.find(e => e.name === activeSkin)
+    if (!active) return generated
+    return [active, ...generated.filter(e => e.name !== activeSkin)]
+  })()
 
   const onDrop = ev => {
     ev.preventDefault()
@@ -1225,6 +1393,10 @@ function ForgePane() {
     onDragOver: ev => ev.preventDefault(),
     onDrop,
     children: [
+      // Pinned escape hatch: always visible, never scrolled away, and immune
+      // to the theme's own colors (hardcoded) so it works even under a
+      // broken/unreadable theme.
+      jsx(forgeEscapeHatch, {}, 'forge-escape'),
       jsxs('div', {
         className: 'flex min-w-0 flex-wrap items-center justify-between gap-2',
         children: [
@@ -1276,11 +1448,11 @@ function ForgePane() {
             className: 'min-h-0 flex-1',
             children: jsx('div', {
               className: viewMode === 'strip' ? 'flex min-w-0 flex-col gap-px' : 'flex min-w-0 flex-col gap-2 pb-2',
-              children: generated.length
-                ? generated.map(entry =>
+              children: list.length
+                ? list.map(entry =>
                     viewMode === 'strip'
-                      ? jsx(StripRow, { entry, onOpen: () => openCard(entry) })
-                      : jsx(ThemeCard, { entry }, entry.name)
+                      ? jsx(StripRow, { entry, active: entry.name === activeSkin, onOpen: () => openCard(entry) })
+                      : jsx(ThemeCard, { entry, active: entry.name === activeSkin }, entry.name)
                   )
                 : jsx('div', { className: 'py-2 text-xs text-(--ui-text-tertiary)', children: 'None yet — forge one above.' })
             })
@@ -1368,6 +1540,10 @@ export default {
     ctx.onDispose(() => {
       if (pasteHandler) window.removeEventListener('paste', pasteHandler, true)
       pasteHandler = null
+      if (forgeSkinObserver) {
+        forgeSkinObserver.disconnect()
+        forgeSkinObserver = null
+      }
       disposersBySlug.forEach(d => d())
       disposersBySlug.clear()
     })
