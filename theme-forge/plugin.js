@@ -576,6 +576,10 @@ function handleFile(file) {
       list.unshift(entry)
       saveThemes(list)
       registerTheme(entry.theme)
+      // Also write the backend skin so it applies live + survives restart.
+      forgeWriteBackendSkin(entry.theme, entry.label).catch(err =>
+        host.notify({ kind: 'warning', message: 'Theme saved, but backend skin write failed.' })
+      )
       haptic('tap')
       host.notify({
         kind: 'success',
@@ -596,7 +600,10 @@ function reforge(entry) {
       const palette = extractPalette(img, 12)
       const ordered = [...palette].sort((a, b) => b.weight - a.weight).slice(0, 8)
       const theme = synthesize(ordered, entry)
-      updateTheme(entry.name, { swatches: ordered, theme, mode: $mode.get() })
+      const updated = updateTheme(entry.name, { swatches: ordered, theme, mode: $mode.get() })
+      if (updated?.theme) {
+        forgeWriteBackendSkin(updated.theme, updated.label).catch(() => {})
+      }
       haptic('tap')
       host.notify({ kind: 'success', message: `"${entry.label}" reforged.` })
     })
@@ -604,15 +611,28 @@ function reforge(entry) {
 }
 
 function applyTheme(entry) {
-  // Forge themes are contributed to the DESKTOP registry only — the backend
-  // can't resolve them, so config.set would silently fall back to `default`.
-  // Deep-link those. Backend-known skins (built-ins) apply LIVE below.
-  if (forgeIsBackendSkin(entry.name)) {
-    forgeApplyLive(entry)
+  // Every forge theme now also has a backend skin YAML (~/.hermes/skins),
+  // so the gateway can resolve it and config.set applies it LIVE — no
+  // Settings visit. Built-in backend skins apply live directly.
+  const writeFirst = !forgeBackendSkins.has(entry.name) && entry.theme
+  const apply = () => {
+    if (forgeIsBackendSkin(entry.name)) {
+      forgeApplyLive(entry)
+      return
+    }
+    host.navigate('/settings?tab=config:appearance')
+    host.notify({ kind: 'info', message: `Click "${entry.label}" in the grid to apply.` })
+  }
+  if (writeFirst) {
+    forgeWriteBackendSkin(entry.theme, entry.label)
+      .then(apply)
+      .catch(() => {
+        host.navigate('/settings?tab=config:appearance')
+        host.notify({ kind: 'info', message: `Click "${entry.label}" in the grid to apply.` })
+      })
     return
   }
-  host.navigate('/settings?tab=config:appearance')
-  host.notify({ kind: 'info', message: `Click "${entry.label}" in the grid to apply.` })
+  apply()
 }
 
 // Backend-known skins: the gateway's `config.set display.skin=<name>` RPC
@@ -625,7 +645,9 @@ const forgeBackendSkins = new Set([
 ])
 
 function forgeIsBackendSkin(name) {
-  return Boolean(name) && forgeBackendSkins.has(name)
+  // Built-in backend skins + any forge-* theme (every forge theme now has a
+  // backend YAML, so the gateway resolves it and config.set applies it live).
+  return Boolean(name) && (forgeBackendSkins.has(name) || name.startsWith('forge-'))
 }
 
 function forgeApplyLive(entry) {
@@ -640,6 +662,81 @@ function forgeApplyLive(entry) {
       host.navigate('/settings?tab=config:appearance')
       host.notify({ kind: 'info', message: `Click "${entry.label}" in the grid to apply.` })
     })
+}
+
+// ── backend skin bridge ────────────────────────────────────────────────────
+// Forge themes are ALSO written as backend skins (~/.hermes/skins/<slug>.yaml)
+// so the gateway can resolve them: config.set skin=<slug> then applies LIVE
+// (no Settings visit) AND the selection survives restarts (backend skins are
+// re-seeded via gateway.ready). Colors map to the exact keys skinToDesktopTheme
+// (apps/desktop/src/themes/skin.ts) reads back out.
+
+const forgeSkinsDir = () => '~/.hermes/skins'
+
+function forgeThemeToBackendColors(theme) {
+  const c = theme.colors || {}
+  return {
+    background: c.background,
+    status_bar_bg: c.background,
+    ui_text: c.foreground,
+    banner_text: c.foreground,
+    ui_accent: c.primary,
+    banner_accent: c.primary,
+    banner_title: c.primary,
+    ui_border: c.border || c.ring,
+    banner_border: c.border || c.ring,
+    banner_dim: c.mutedForeground,
+    session_border: c.border || c.ring,
+    ui_error: c.destructive,
+    completion_menu_bg: c.muted
+  }
+}
+
+function forgeBackendYaml(theme, label) {
+  const colors = forgeThemeToBackendColors(theme)
+  const lines = [
+    `# Forged by Theme Forge — ${label || theme.name}`,
+    `name: ${theme.name}`,
+    `description: "${String(label || theme.name).replace(/"/g, '\\"')}"`,
+    'colors:'
+  ]
+  for (const [key, value] of Object.entries(colors)) {
+    if (value) lines.push(`  ${key}: "${value}"`)
+  }
+  return lines.join('\n') + '\n'
+}
+
+let forgeSkinsDirReady = null
+async function forgeEnsureSkinsDir() {
+  if (forgeSkinsDirReady) return forgeSkinsDirReady
+  forgeSkinsDirReady = host
+    .request('shell.exec', { command: `mkdir -p ${forgeSkinsDir()}` })
+    .then(() => true)
+    .catch(err => {
+      forgeSkinsDirReady = null
+      throw err
+    })
+  return forgeSkinsDirReady
+}
+
+async function forgeWriteBackendSkin(theme, label) {
+  await forgeEnsureSkinsDir()
+  const path = `${forgeSkinsDir()}/${theme.name}.yaml`
+  if (window.hermesDesktop && typeof window.hermesDesktop.writeTextFile === 'function') {
+    await window.hermesDesktop.writeTextFile(path, forgeBackendYaml(theme, label))
+    return true
+  }
+  return false
+}
+
+async function forgeRemoveBackendSkin(name) {
+  if (window.hermesDesktop && typeof window.hermesDesktop.trashPath === 'function') {
+    try {
+      await window.hermesDesktop.trashPath(`${forgeSkinsDir()}/${name}.yaml`)
+    } catch (err) {
+      // Already gone — fine.
+    }
+  }
 }
 
 // ── escape hatch (theme-immune) ─────────────────────────────────────────────
@@ -1330,6 +1427,7 @@ function ThemeCard({ entry, active }) {
               saveThemes(list)
               const d = disposersBySlug.get(entry.name)
               if (d) { d(); disposersBySlug.delete(entry.name) }
+              forgeRemoveBackendSkin(entry.name)
               haptic('tap')
               host.notify({ kind: 'info', message: `Removed "${entry.label}".` })
             }, children: jsx(icons.Trash2, {}) })
@@ -1496,6 +1594,47 @@ export default {
       if (entry?.theme?.name && entry.theme.colors) registerTheme(entry.theme)
     }
     $generated.set(migrated)
+
+    // Persistence bridge: write every persisted theme as a backend skin so the
+    // gateway can resolve it at boot, then restore the user's saved appearance
+    // once connected. The desktop hydrates the saved skin into state BEFORE
+    // plugin/backend themes exist (so it snaps to default); we re-apply the
+    // saved choice live via config.set after the gateway is ready.
+    const persisted = migrated.filter(e => e?.theme?.name && e.theme.colors)
+    persisted.forEach(e => forgeWriteBackendSkin(e.theme, e.label).catch(() => {}))
+    const restoreSaved = () => {
+      // Read the app's persisted skin name (localStorage; the app never
+      // overwrites it on the boot snap — resolve only reads).
+      let saved = null
+      try {
+        const profile = window.localStorage.getItem('hermes-desktop-active-profile-v1') || 'default'
+        saved = (() => {
+          if (profile === 'default') return window.localStorage.getItem('hermes-desktop-theme-v2')
+          try {
+            const rec = JSON.parse(window.localStorage.getItem('hermes-desktop-profile-themes-v1') || '{}')
+            return rec[profile]
+          } catch {
+            return null
+          }
+        })()
+      } catch {
+        saved = null
+      }
+      if (!saved || !saved.startsWith('forge-')) return
+      const entry = persisted.find(e => e.theme.name === saved)
+      if (!entry) return
+      // Ensure the backend YAML exists before the gateway resolves it, then
+      // re-apply live. Awaits the write so config.set never races a rejected
+      // prior boot write (which would silently fall back to default).
+      forgeWriteBackendSkin(entry.theme, entry.label)
+        .then(() => forgeApplyLive(entry))
+        .catch(() => {})
+    }
+    // Re-apply once the gateway is connected (active skin is then resolvable).
+    const gatewayReadyOff = host.onEvent('gateway.ready', () => {
+      restoreSaved()
+      gatewayReadyOff()
+    })
 
     $viewMode.set(normalizeViewMode(ctx.storage.get($viewModeKey, 'cards')))
 
