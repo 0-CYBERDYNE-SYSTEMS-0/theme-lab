@@ -3,7 +3,8 @@
 // asserts the generated DesktopTheme is structurally valid.
 
 const fs = require('fs')
-const src = fs.readFileSync(process.env.HOME + '/.hermes/desktop-plugins/theme-forge/plugin.js', 'utf8')
+const pluginPath = process.env.THEME_FORGE_PLUGIN || process.env.HOME + '/.hermes/desktop-plugins/theme-forge/plugin.js'
+const src = fs.readFileSync(pluginPath, 'utf8')
 
 // Pull out everything between the color-math header and the UI section,
 // minus the canvas-dependent extractPalette (tested separately with fake boxes).
@@ -34,7 +35,7 @@ for (const wantDark of [true, false]) {
   const c = buildColorsFromPalette(palette, wantDark)
   const label = wantDark ? 'dark' : 'light'
   check(`[${label}] required keys`, REQUIRED.every(k => typeof c[k] === 'string' && /^#[0-9a-f]{6}$/i.test(c[k])))
-  check(`[${label}] all 23 tokens are hex`, Object.entries(c).every(([k, v]) => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v), Object.keys(c).length + ' tokens'))
+  check(`[${label}] all 25 color tokens are hex`, Object.keys(c).length === 25 && Object.entries(c).every(([k, v]) => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v)), Object.keys(c).length + ' tokens')
   // VERBATIM contract (post-blending-fix): slot 1 IS the background, exact.
   check(`[${label}] bg equals slot-1 swatch VERBATIM`, c.background.toLowerCase() === palette[0].hex.toLowerCase(), `${c.background} vs ${palette[0].hex}`)
   check(`[${label}] fg equals slot-2 swatch VERBATIM`, c.foreground.toLowerCase() === palette[1].hex.toLowerCase(), `${c.foreground} vs ${palette[1].hex}`)
@@ -156,6 +157,36 @@ check('slot2-ctrl: light seed fg VERBATIM', lightSeedFGResult.toLowerCase() === 
 // Single-swatch fallback derives a usable fg (different from bg).
 check('slot2-ctrl: single swatch still derives fg', typeof themeSingle.darkColors.foreground === 'string' && themeSingle.darkColors.foreground.toLowerCase() !== themeSingle.darkColors.background.toLowerCase(), themeSingle.darkColors.foreground)
 
+// ── Swatch coverage + contrast regression ────────────────────────────────────
+// A medium-bright background exposed the old polarity heuristic: pink text was
+// blended all the way to white, then fell back to white again. The placed color
+// must remain distinguishable whenever the safety floor can preserve it.
+const tealBg = mk(44, 183, 166, 4000)
+const pinkText = mk(227, 76, 136, 2000)
+const testOrange = mk(255, 120, 50, 1000)
+const tealPink = synthesize([tealBg, pinkText, testOrange, deepBlue], { name: 'teal-pink', label: 'teal-pink', mode: 'dark' })
+// A medium-bright background must not bleach the placed chromatic text seed.
+check('contrast: medium-bright bg preserves placed pink text', tealPink.darkColors.foreground.toLowerCase() === pinkText.hex.toLowerCase(), `${tealPink.darkColors.foreground} vs ${pinkText.hex}`)
+check('contrast: terminal preserves placed pink text', tealPink.darkTerminal.foreground.toLowerCase() === pinkText.hex.toLowerCase(), `${tealPink.darkTerminal.foreground} vs ${pinkText.hex}`)
+
+// Every retained extracted swatch must have a real downstream effect. This is
+// deliberately behavioral: changing a slot must change at least one DesktopTheme
+// or terminal token, not merely leave a painted square in the tray.
+const coveragePalette = [
+  deepBlue, pinkText, testOrange, mk(46, 160, 120, 1000), mk(40, 100, 220, 1000),
+  mk(190, 60, 190, 1000), mk(240, 200, 60, 1000), mk(140, 140, 150, 1000),
+  mk(220, 80, 80, 1000), mk(80, 190, 160, 1000), mk(80, 120, 220, 1000), mk(180, 90, 190, 1000)
+]
+const coverageBase = synthesize(coveragePalette, { name: 'coverage', label: 'coverage', mode: 'dark' })
+const signature = theme => JSON.stringify({ colors: theme.darkColors, terminal: theme.darkTerminal })
+const baseSignature = signature(coverageBase)
+for (let i = 0; i < coveragePalette.length; i++) {
+  const replacement = mk(10 + i * 17, 230 - i * 11, 20 + i * 19, 1000)
+  const changed = [...coveragePalette]
+  changed[i] = replacement
+  check(`swatch-${i + 1}: changes generated output`, signature(synthesize(changed, { name: 'coverage', label: 'coverage', mode: 'dark' })) !== baseSignature, `${coveragePalette[i].hex} → ${replacement.hex}`)
+}
+
 // ── Contrast floor (tripwire) ───────────────────────────────────────────────
 // The disaster the floor exists for: near-black bg + near-black text must be
 // nudged to a readable ratio, while a deliberately readable pair stays verbatim.
@@ -185,7 +216,6 @@ check('floor: readable pair stays VERBATIM (floor is no-op)', readableFG.toLower
 check('floor: light seed fg VERBATIM on dark bg', lightSeedFGResult.toLowerCase() === lightSeedFG.hex.toLowerCase(), `${lightSeedFGResult} vs ${lightSeedFG.hex}`)
 
 // ── Plugin behavior probes ────────────────────────────────────────────────
-const pluginPath = process.env.HOME + '/.hermes/desktop-plugins/theme-forge/plugin.js'
 const pluginSrc = fs.readFileSync(pluginPath, 'utf8')
 
 // viewMode persistence defaults to cards and round-trips through storage.
@@ -266,8 +296,8 @@ check('wheel: commitWheel saves both swatches and theme', pluginSrc.includes('up
 // trades captions for its labeled row + hover role tooltips so it stays scannable
 // and never becomes another horizontal control rail.
 check('labels: card tray captions bkgnd/text present', pluginSrc.includes("i === 0 ? 'bkgnd' : i === 1 ? 'text' : ''"))
-check('labels: strip swatches retain background/text role tooltips', pluginSrc.includes('`#1 · background · ${s.hex}`') && pluginSrc.includes('`#2 · text · ${s.hex}`'))
-check('labels: slot tooltips explain their role', pluginSrc.includes('background seed') && pluginSrc.includes('text seed'))
+check('labels: strip swatches expose semantic roles', pluginSrc.includes('`#${i + 1} · ${swatchRole(i)} · ${s.hex}`'))
+check('labels: every retained slot has an explicit role label', pluginSrc.includes('SWATCH_ROLE_LABELS') && pluginSrc.includes('ANSI magenta/bubble seed'))
 
 // ── Sleek naming: no auto 'Forge · ' branding ───────────────────────────
 check('naming: stripForgePrefix removes auto prefix', stripForgePrefix('Forge · Sunset') === 'Sunset', stripForgePrefix('Forge · Sunset'))
@@ -297,9 +327,9 @@ check('commit: OK passes the live (selected) color', pluginSrc.includes('onClick
 check('commit: commitWheel writes exact hex to swatch', pluginSrc.includes('const next = swatches.map((s, i) => (i === index ? { ...s, hex, hsl: hexToHsl(hex) } : s))'))
 check('commit: commitWheel synthesizes from that exact swatch', pluginSrc.includes('const theme = synthesize(next, entry)'))
 check('commit: slot-1 bg is verbatim (no blend)', pluginSrc.includes('const background = seed.hex'))
-check('commit: slot-2 text is verbatim (no blend)', pluginSrc.includes('foreground = ordered[1].hex'))
-check('commit: terminal text is verbatim (floor only trips on unreadable)', pluginSrc.includes('foreground: fgSeed ? ensureContrast(fgSeed, bg, FORGE_TEXT_FLOOR) : readableOn(bg)'))
-check('commit: accent is verbatim', pluginSrc.includes('const accentSafe = accentRaw.hex'))
+check('commit: slot-2 text is verbatim or narrow-tripwire guarded', pluginSrc.includes('const primaryRaw = slot(1)') && pluginSrc.includes('placedTextColor(primaryRaw.hex, background)'))
+check('commit: terminal text preserves placed color or narrow-tripwire guards', pluginSrc.includes('foreground: fgSeed ? placedTextColor(fgSeed, bg) : readableOn(bg)'))
+check('commit: later swatches have explicit semantic roles', pluginSrc.includes('const secondaryRaw = slot(2, primaryRaw)') && pluginSrc.includes('const bubbleRaw = slot(7, accentRaw)') && pluginSrc.includes('const redSeed = seedAt(8)'))
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} FAILURES`)
 process.exit(failures ? 1 : 0)

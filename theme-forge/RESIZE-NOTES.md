@@ -50,3 +50,16 @@ The color wheel's hue/sat picking uses `setPointerCapture` on the wheel div —
 handlers (`onPointerDown/Move/Up/Cancel`) MUST stay attached to that same div.
 A refactor that lifts them off silently kills the drag (this happened once;
 regression-fixed in commit 5404738).
+
+## Palette retention and role mapping
+
+- Image extraction uses median-cut with a maximum of **12** color boxes.
+- New and reforged entries retain all extracted boxes through persistence and
+  render all retained slots in the wrapping tray/strip.
+- Slot roles are explicit: background; text/primary; secondary; accent;
+  destructive; border; input/sidebar; bubble; then ANSI red/green/blue/magenta.
+- Slots 9–12 also seed visible destructive/accent/sidebar/bubble surfaces so the
+  palette remains meaningful when a backend skin bridge does not carry ANSI
+  fields through to the host.
+- Placed chromatic background/text colors remain verbatim. Only neutral,
+  genuinely unreadable text seeds enter the narrow contrast tripwire.

@@ -42,6 +42,13 @@ const $editing = atom(null) // slug being renamed
 const $picked = atom(null) // { slug, index } — swatch awaiting a new position
 const $viewMode = atom('cards') // 'cards' | 'strip' — strip = quiet swatch-only overview
 const $viewModeKey = 'theme-forge-viewMode'
+const MAX_SWATCHES = 12
+const SWATCH_ROLE_LABELS = [
+  'background seed', 'text/primary seed', 'secondary seed', 'accent seed',
+  'destructive seed', 'border seed', 'input/sidebar seed', 'bubble seed',
+  'ANSI red/destructive seed', 'ANSI green/accent seed', 'ANSI blue/sidebar seed', 'ANSI magenta/bubble seed'
+]
+const swatchRole = index => SWATCH_ROLE_LABELS[index] || `palette seed ${index + 1}`
 
 /** Strip mode is display-only; card mode is the editor. */
 function normalizeViewMode(v) {
@@ -137,18 +144,25 @@ const contrast = (a, b) => {
   return la >= lb ? (la + 0.05) / (lb + 0.05) : (lb + 0.05) / (la + 0.05)
 }
 
-const readableOn = bg => (luminance(bg) > 0.58 ? '#161616' : '#ffffff')
+const readableOn = bg => (contrast('#161616', bg) >= contrast('#ffffff', bg) ? '#161616' : '#ffffff')
 
 const ensureContrast = (color, bg, min) => {
   if (contrast(color, bg) >= min) return color
-  const toward = luminance(bg) < 0.5 ? '#ffffff' : '#000000'
+
+  // Do not guess polarity from a luminance cutoff: medium-bright colors such as
+  // teal can be closer to white by luminance while still offering much better
+  // contrast with black. Search both directions and keep the best hue-bearing
+  // candidate, returning as soon as the tripwire is cleared.
+  const directions = ['#ffffff', '#161616'].sort((a, b) => contrast(b, bg) - contrast(a, bg))
   let best = color
-  for (let t = 0.1; t <= 1.001; t += 0.1) {
-    const c = mix(color, toward, t)
-    if (contrast(c, bg) > contrast(best, bg)) best = c
-    if (contrast(c, bg) >= min) return c
+  for (let t = 0.05; t <= 1.001; t += 0.05) {
+    for (const toward of directions) {
+      const candidate = mix(color, toward, t)
+      if (contrast(candidate, bg) > contrast(best, bg)) best = candidate
+      if (contrast(candidate, bg) >= min) return candidate
+    }
   }
-  return readableOn(bg)
+  return best
 }
 
 /**
@@ -162,6 +176,17 @@ const ensureContrast = (color, bg, min) => {
  * freedom while guaranteeing the theme is never literally unreadable.
  */
 const FORGE_TEXT_FLOOR = 3
+
+const placedTextColor = (hex, bg) => {
+  const rgb = hexToRgb(hex)
+  const saturation = rgb ? rgbToHsl(rgb[0], rgb[1], rgb[2]).s : 0
+  const spread = rgb ? (Math.max(...rgb) - Math.min(...rgb)) / 255 : 0
+  // A placed chromatic color is user intent. Preserve it exactly; only neutral
+  // near-black/near-white seeds go through the readability tripwire. HSL alone
+  // treats a one-channel rounding difference as saturated, so require visible
+  // RGB spread as well.
+  return saturation > 0.08 && spread > 0.04 ? hex : ensureContrast(hex, bg, FORGE_TEXT_FLOOR)
+}
 
 function rgbToHsl(r, g, b) {
   r /= 255
@@ -304,48 +329,51 @@ const slugify = s =>
 function ansiPalette(ordered, bg, fgSeed) {
   const bgL = luminance(bg)
   const darkBg = bgL < 0.5
-  // accent priority = swatches after the bg seed, chromatic ones first
-  const chroma = ordered.slice(1).filter(c => c.hsl.s > 0.12)
-  const fallbacks = ordered.slice(1).filter(c => c.hsl.s <= 0.12)
-  const pool = [...chroma, ...fallbacks]
-
-  const pick = (hLo, hHi, fi) => {
-    const hit = chroma.find(c => {
-      const h = c.hsl.h * 360
-      return h >= hLo && h < hHi
-    })
-    const alt = pool.find((c, i) => i === fi % Math.max(1, pool.length))
-    return (hit || alt || ordered[0]).hex
-  }
+  const fallback = ordered[2] || ordered[1] || ordered[0] || { hex: '#808080' }
+  // Fixed ANSI roles keep late extracted swatches load-bearing instead of
+  // letting the first hue match silently shadow every later swatch.
+  const seedAt = (index, fallbackSeed = fallback) => (ordered[index] || fallbackSeed).hex
+  const redSeed = seedAt(8)
+  const greenSeed = seedAt(9, ordered[3] || fallback)
+  const yellowSeed = seedAt(6, ordered[4] || fallback)
+  const blueSeed = seedAt(10, ordered[4] || fallback)
+  const magentaSeed = seedAt(11, ordered[5] || fallback)
+  const cyanSeed = seedAt(7, ordered[3] || fallback)
 
   const tune = (hex, lift) =>
     darkBg ? ensureContrast(mix(hex, '#ffffff', lift), bg, 3) : ensureContrast(mix(hex, '#000000', lift * 0.8), bg, 3)
 
   const black = darkBg ? mix(bg, '#ffffff', 0.08) : mix(bg, '#000000', 0.55)
   const white = darkBg ? mix(bg, '#ffffff', 0.85) : mix(bg, '#000000', 0.08)
+  const red = tune(redSeed, 0.1)
+  const green = tune(greenSeed, 0.1)
+  const yellow = tune(yellowSeed, 0.1)
+  const blue = tune(blueSeed, 0.1)
+  const magenta = tune(magentaSeed, 0.1)
+  const cyan = tune(cyanSeed, 0.1)
 
   return {
     // Terminal body text follows the slot-2 swatch VERBATIM — the exact color
     // the user places is the terminal foreground. Tripwire floor applies: a
     // no-op above FORGE_TEXT_FLOOR, nudges only when the pair is unreadable.
-    foreground: fgSeed ? ensureContrast(fgSeed, bg, FORGE_TEXT_FLOOR) : readableOn(bg),
-    cursor: tune(pick(150, 260, 0), 0.2),
+    foreground: fgSeed ? placedTextColor(fgSeed, bg) : readableOn(bg),
+    cursor: tune(seedAt(5, ordered[1] || fallback), 0.2),
     selectionBackground: darkBg ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.14)',
     black,
-    red: tune(pick(345, 381, 0), 0.1),
-    green: tune(pick(80, 160, 1), 0.1),
-    yellow: tune(pick(40, 70, 2), 0.1),
-    blue: tune(pick(200, 260, 3), 0.1),
-    magenta: tune(pick(280, 345, 4), 0.1),
-    cyan: tune(pick(160, 200, 5), 0.1),
+    red,
+    green,
+    yellow,
+    blue,
+    magenta,
+    cyan,
     white,
     brightBlack: mix(black, white, darkBg ? 0.35 : 0.25),
-    brightRed: mix(tune(pick(345, 381, 0), 0.1), white, darkBg ? 0.25 : 0),
-    brightGreen: mix(tune(pick(80, 160, 1), 0.1), white, darkBg ? 0.25 : 0),
-    brightYellow: mix(tune(pick(40, 70, 2), 0.1), white, darkBg ? 0.25 : 0),
-    brightBlue: mix(tune(pick(200, 260, 3), 0.1), white, darkBg ? 0.25 : 0),
-    brightMagenta: mix(tune(pick(280, 345, 4), 0.1), white, darkBg ? 0.25 : 0),
-    brightCyan: mix(tune(pick(160, 200, 5), 0.1), white, darkBg ? 0.25 : 0),
+    brightRed: mix(red, white, darkBg ? 0.25 : 0),
+    brightGreen: mix(green, white, darkBg ? 0.25 : 0),
+    brightYellow: mix(yellow, white, darkBg ? 0.25 : 0),
+    brightBlue: mix(blue, white, darkBg ? 0.25 : 0),
+    brightMagenta: mix(magenta, white, darkBg ? 0.25 : 0),
+    brightCyan: mix(cyan, white, darkBg ? 0.25 : 0),
     brightWhite: mix(white, darkBg ? '#ffffff' : '#000000', darkBg ? 0.4 : 0.18)
   }
 }
@@ -354,56 +382,54 @@ function buildColorsFromPalette(ordered, wantDark) {
   const seed = ordered[0] || { hex: wantDark ? '#101014' : '#fafafa', hsl: { h: 0, s: 0, l: wantDark ? 0.06 : 0.97 } }
   const rest = ordered.slice(1)
   const byLum = [...rest].sort((a, b) => a.hsl.l - b.hsl.l)
-  const chromaRank = [...rest].sort((a, b) => b.hsl.s * (1 - Math.abs(b.hsl.l - 0.5)) - a.hsl.s * (1 - Math.abs(a.hsl.l - 0.5)))
+  const slot = (index, fallback = seed) => ordered[index] || fallback
 
-  // accent = first chromatic swatch in USER order (priority), else chroma rank
-  const userAccent = rest.find(c => c.hsl.s > 0.12)
-  const accentRaw = userAccent || chromaRank[0] || seed
+  // Ordered roles make every retained image swatch load-bearing. Slot 1 and
+  // slot 2 remain the user's background/text controls; later slots feed named
+  // desktop surfaces in order, while slots 9–12 feed ANSI roles below.
+  const primaryRaw = slot(1)
+  const secondaryRaw = slot(2, primaryRaw)
+  const accentRaw = slot(3, secondaryRaw)
+  const destructiveRaw = slot(4, accentRaw)
+  const borderRaw = slot(5, secondaryRaw)
+  const inputRaw = slot(6, borderRaw)
+  const bubbleRaw = slot(7, accentRaw)
+  const terminalRedRaw = slot(8, destructiveRaw)
+  const terminalGreenRaw = slot(9, accentRaw)
+  const terminalBlueRaw = slot(10, inputRaw)
+  const terminalMagentaRaw = slot(11, bubbleRaw)
 
-  // ── Background: slot 1 IS the background color, VERBATIM. No lightness
-  // enforcement, no mix-toward-black/white: the color the user places in
-  // slot 1 is exactly the background the theme uses. (The old enforcement
-  // "blended" every seed toward near-black/near-white, so placing a swatch
-  // never showed THAT color.)
+  // Slot 1 IS the background color, VERBATIM.
   const background = seed.hex
 
-  // Foreground: slot 2 IS the foreground/text color, VERBATIM. No lightness
-  // guidance: the exact color the user places in slot 2 is the starting text
-  // color (UI + terminal). This is the fix for "swapped swatches and text
-  // never visibly changed" — the old code blended every slot-2 seed toward
-  // near-white/near-black for contrast, so the swap never showed THAT color.
-  //
-  // Tripwire floor (below): the verbatim contract is preserved UNLESS the pair
-  // is genuinely unreadable (near-black text on a near-black bg). ensureContrast
-  // is a no-op above the floor, so deliberate, readable low-contrast choices
-  // pass through untouched — freedom kept. Only a hard illegibility (contrast
-  // < FORGE_TEXT_FLOOR) nudges toward the correct polarity, just enough to clear
-  // the floor. This is the backstop the user asked for after landing on a
-  // super-dark, unreadable theme.
+  // Slot 2 IS the foreground/text color. Chromatic placed colors stay exact;
+  // neutral disaster cases still clear the narrow readability tripwire.
   let foreground
   if (ordered.length >= 2) {
-    foreground = ordered[1].hex
+    foreground = placedTextColor(primaryRaw.hex, background)
+  } else if (wantDark) {
+    foreground = (byLum[byLum.length - 1] || seed).hex
+    if (luminance(foreground) < 0.55) foreground = mix(foreground, '#ffffff', 0.75)
+    foreground = ensureContrast(foreground, background, FORGE_TEXT_FLOOR)
   } else {
-    if (wantDark) {
-      foreground = (byLum[byLum.length - 1] || seed).hex
-      if (luminance(foreground) < 0.55) foreground = mix(foreground, '#ffffff', 0.75)
-    } else {
-      foreground = (byLum[0] || seed).hex
-      if (luminance(foreground) > 0.35) foreground = mix(foreground, '#060608', 0.7)
-    }
+    foreground = (byLum[0] || seed).hex
+    if (luminance(foreground) > 0.35) foreground = mix(foreground, '#060608', 0.7)
+    foreground = ensureContrast(foreground, background, FORGE_TEXT_FLOOR)
   }
-  foreground = ensureContrast(foreground, background, FORGE_TEXT_FLOOR)
 
-  const accentSafe = accentRaw.hex
-  const card = wantDark ? mix(background, '#ffffff', 0.045) : mix(background, '#000000', 0.015)
-  const muted = wantDark ? mix(background, '#ffffff', 0.07) : mix(background, '#000000', 0.045)
+  const card = wantDark ? mix(background, secondaryRaw.hex, 0.28) : mix(background, secondaryRaw.hex, 0.16)
+  const muted = wantDark ? mix(background, secondaryRaw.hex, 0.42) : mix(background, secondaryRaw.hex, 0.24)
   const mutedFg = ensureContrast(mix(foreground, background, 0.42), background, 4.5)
-  const border = wantDark ? mix(background, '#ffffff', 0.14) : mix(background, '#000000', 0.13)
+  const border = mix(background, borderRaw.hex, wantDark ? 0.38 : 0.32)
+  const input = mix(background, inputRaw.hex, wantDark ? 0.42 : 0.36)
+  const secondary = mix(muted, secondaryRaw.hex, 0.42)
+  const accentSource = mix(accentRaw.hex, terminalGreenRaw.hex, 0.18)
+  const accent = mix(muted, accentSource, 0.45)
+  const terminalBlueSource = mix(inputRaw.hex, terminalBlueRaw.hex, 0.2)
+  const terminalMagentaSource = mix(accentRaw.hex, terminalMagentaRaw.hex, 0.24)
 
   return {
     background,
-    // Slot-2 color is the text color, verbatim — no contrast re-mix so the
-    // swap shows THAT color on screen. (Readability is the user's call now.)
     foreground,
     card,
     cardForeground: foreground,
@@ -411,23 +437,23 @@ function buildColorsFromPalette(ordered, wantDark) {
     mutedForeground: mutedFg,
     popover: card,
     popoverForeground: foreground,
-    primary: accentSafe,
-    primaryForeground: readableOn(accentSafe),
-    secondary: mix(muted, accentSafe, 0.12),
+    primary: primaryRaw.hex,
+    primaryForeground: readableOn(primaryRaw.hex),
+    secondary,
     secondaryForeground: ensureContrast(foreground, muted, 5),
-    accent: mix(muted, accentSafe, 0.22),
-    accentForeground: ensureContrast(foreground, mix(muted, accentSafe, 0.22), 5),
+    accent,
+    accentForeground: ensureContrast(foreground, accent, 5),
     border,
-    input: border,
-    ring: accentSafe,
-    midground: accentSafe,
-    composerRing: accentSafe,
-    destructive: ensureContrast(wantDark ? '#c0473a' : '#c72e4d', background, 3),
-    destructiveForeground: '#ffffff',
-    sidebarBackground: wantDark ? mix(background, '#000000', 0.16) : mix(background, '#000000', 0.03),
-    sidebarBorder: wantDark ? mix(border, '#ffffff', 0.02) : border,
-    userBubble: mix(muted, accentSafe, 0.16),
-    userBubbleBorder: mix(border, accentSafe, 0.3)
+    input,
+    ring: primaryRaw.hex,
+    midground: primaryRaw.hex,
+    composerRing: accentSource,
+    destructive: ensureContrast(mix(destructiveRaw.hex, terminalRedRaw.hex, 0.35), background, 3),
+    destructiveForeground: readableOn(destructiveRaw.hex),
+    sidebarBackground: mix(background, terminalBlueSource, wantDark ? 0.18 : 0.12),
+    sidebarBorder: mix(border, bubbleRaw.hex, 0.32),
+    userBubble: mix(muted, bubbleRaw.hex, 0.46),
+    userBubbleBorder: mix(border, terminalMagentaSource, 0.38)
   }
 }
 
@@ -543,11 +569,11 @@ async function forgeTheme(file, mode) {
   const url = URL.createObjectURL(file)
   try {
     const img = await loadImageFromUrl(url)
-    const palette = extractPalette(img, 12)
+    const palette = extractPalette(img, MAX_SWATCHES)
     const baseName = file.name.replace(/\.[a-z0-9]+$/i, '')
     const slug = slugify(baseName)
     const label = baseName.length > 24 ? baseName.slice(0, 24) + '…' : baseName
-    const ordered = [...palette].sort((a, b) => b.weight - a.weight).slice(0, 8)
+    const ordered = [...palette].sort((a, b) => b.weight - a.weight).slice(0, MAX_SWATCHES)
     const themeName = `forge-${slug}`
 
     return {
@@ -597,8 +623,8 @@ function reforge(entry) {
   }
   loadImageFromUrl(entry.source)
     .then(img => {
-      const palette = extractPalette(img, 12)
-      const ordered = [...palette].sort((a, b) => b.weight - a.weight).slice(0, 8)
+      const palette = extractPalette(img, MAX_SWATCHES)
+      const ordered = [...palette].sort((a, b) => b.weight - a.weight).slice(0, MAX_SWATCHES)
       const theme = synthesize(ordered, entry)
       const updated = updateTheme(entry.name, { swatches: ordered, theme, mode: $mode.get() })
       if (updated?.theme) {
@@ -833,10 +859,10 @@ function StripRow({ entry, onEdit, active }) {
             className: 'grid shrink-0 gap-0.5',
             style: { gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', width: 62 },
             'aria-hidden': true,
-            children: swatches.slice(0, 8).map((s, i) => jsx('span', {
+            children: swatches.slice(0, MAX_SWATCHES).map((s, i) => jsx('span', {
               className: 'h-3.5 w-3.5 justify-self-center rounded-[2px]',
               style: { background: s.hex },
-              title: i === 0 ? `#1 · background · ${s.hex}` : i === 1 ? `#2 · text · ${s.hex}` : `#${i + 1} · ${s.hex}`
+              title: `#${i + 1} · ${swatchRole(i)} · ${s.hex}`
             }, `s-${i}`))
           })
         ]
@@ -965,7 +991,7 @@ function SwatchTray({ entry }) {
         className: 'text-[0.625rem] text-(--ui-text-quaternary)',
         children: pickedHere !== null
           ? 'picked up — click a slot to place (click again to cancel)'
-          : 'swatch 1 = background hue · swatch 2 = text · tap to pick up, double-click to edit'
+          : 'swatch roles: background · text/primary · secondary · accent · error · border · input · bubble · ANSI ×4 · tap to pick up',
       }),
       jsx('div', {
         // Swatches remain comfortably tappable but wrap into additional rows as
@@ -984,18 +1010,8 @@ function SwatchTray({ entry }) {
                   {
                     type: 'button',
                     draggable: true,
-                    title:
-                      i === 0
-                        ? `#1 · background seed · ${s.hex}`
-                        : i === 1
-                          ? `#2 · text seed · ${s.hex}`
-                          : `#${i + 1} · ${s.hex}`,
-                    'aria-label':
-                      i === 0
-                        ? `Swatch 1, background seed, ${s.hex}`
-                        : i === 1
-                          ? `Swatch 2, text seed, ${s.hex}`
-                          : `Swatch ${i + 1}, ${s.hex}`,
+                    title: `#${i + 1} · ${swatchRole(i)} · ${s.hex}`,
+                    'aria-label': `Swatch ${i + 1}, ${swatchRole(i)}, ${s.hex}`,
                     onClick: () => place(i),
                     onDoubleClick: () => openWheel(i),
                     onDragStart: ev => {
