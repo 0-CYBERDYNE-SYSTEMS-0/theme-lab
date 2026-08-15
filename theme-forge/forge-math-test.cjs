@@ -204,6 +204,39 @@ check('ui: StripRow component exists', stripRowExists)
 const stripEntrypoint = pluginSrc.includes('StripRow')
 check('ui: strip mode renders StripRow', stripEntrypoint)
 
+// ── Apply / no-horizontal-scroll contract ──────────────────────────────────
+// The strip is a fast scheme picker, not a dead-end overview: its main row
+// applies; its separate edit affordance opens the fuller card editor. Cards
+// use the same live apply path. Primary swatch controls wrap rather than
+// stealing a vertical wheel gesture for sideways scrolling. The terminal is
+// the sole intentional horizontal-scroll surface for monospace lines.
+check('apply: strip row is a primary apply surface with a separate edit action', pluginSrc.includes('function StripRow({ entry, onEdit, active })'))
+check('apply: card apply uses the shared live apply path', pluginSrc.includes('onClick: () => applyTheme(entry)'))
+const stripStart = pluginSrc.indexOf('function StripRow(')
+const stripEnd = pluginSrc.indexOf('// ── UI bits', stripStart)
+const stripSource = stripStart >= 0 && stripEnd > stripStart ? pluginSrc.slice(stripStart, stripEnd) : ''
+const trayStart = pluginSrc.indexOf('function SwatchTray(')
+const trayEnd = pluginSrc.indexOf('function clamp01(', trayStart)
+const traySource = trayStart >= 0 && trayEnd > trayStart ? pluginSrc.slice(trayStart, trayEnd) : ''
+check('layout: strip has no horizontal scroller or wheel-to-horizontal hijack', !stripSource.includes('overflow-x-auto') && !stripSource.includes('scrollLeft'))
+check('layout: card swatches wrap without horizontal scrolling', !traySource.includes('overflow-x-auto') && !traySource.includes('scrollLeft'))
+const horizontalScrollCount = (pluginSrc.match(/overflow-x-auto/g) || []).length
+check('layout: terminal preview is the only intentional horizontal scroll surface', horizontalScrollCount === 1, horizontalScrollCount + ' occurrences')
+check('layout: Forge declares an explicit workspace-right dock for independent resizing', pluginSrc.includes("dock: { pane: 'workspace', pos: 'right' }"))
+
+// Card mode must react to every sash drag: one full-width card in a narrow
+// pane, then additional columns only when a whole 240px card fits. `min(100%,
+// 240px)` matters — a raw 240px track would overflow the 220px minimum pane.
+const forgeStart = pluginSrc.indexOf('function ForgePane()')
+const forgeEnd = pluginSrc.indexOf('// ── plugin entry', forgeStart)
+const forgeSource = forgeStart >= 0 && forgeEnd > forgeStart ? pluginSrc.slice(forgeStart, forgeEnd) : ''
+const cardStart = pluginSrc.indexOf('function ThemeCard(')
+const cardEnd = pluginSrc.indexOf('function ForgePane()', cardStart)
+const cardSource = cardStart >= 0 && cardEnd > cardStart ? pluginSrc.slice(cardStart, cardEnd) : ''
+check('layout: cards use a responsive auto-fit grid', forgeSource.includes("gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))'"))
+check('layout: card grid owns full available pane width without a horizontal overflow fallback', forgeSource.includes("'grid w-full min-w-0 gap-2 pb-2'"))
+check('layout: each card can shrink inside an adaptive grid track', cardSource.includes("'flex min-w-0 w-full h-full flex-col"))
+
 // ── Wheel editor: commit-only, no live synthesis race ───────────────────────
 // onChange must NOT call synthesize — it fires on every wheel drag pixel and
 // would overwrite the committed color with intermediate grays. Only commitWheel
@@ -229,10 +262,11 @@ check('wheel: onChange only updates swatches', onChangeBlock && onChangeBlock.in
 check('wheel: commitWheel still synthesizes', pluginSrc.includes('const commitWheel = (index, hex) => {') && pluginSrc.includes('const theme = synthesize(next, entry)'))
 check('wheel: commitWheel saves both swatches and theme', pluginSrc.includes('updateTheme(entry.name, { swatches: next, theme })'))
 
-// ── bkgnd / text role captions on slot 1 + slot 2 (both view modes) ─────────
-check('labels: tray captions bkgnd/text present', pluginSrc.includes("i === 0 ? 'bkgnd' : i === 1 ? 'text' : ''"))
-const captionOccurrences = (pluginSrc.match(/i === 0 \? 'bkgnd' : i === 1 \? 'text'/g) || []).length
-check('labels: captions wired in BOTH card tray and strip row', captionOccurrences === 2, captionOccurrences + ' occurrences')
+// The full card editor keeps explicit bkgnd/text captions. The compact strip
+// trades captions for its labeled row + hover role tooltips so it stays scannable
+// and never becomes another horizontal control rail.
+check('labels: card tray captions bkgnd/text present', pluginSrc.includes("i === 0 ? 'bkgnd' : i === 1 ? 'text' : ''"))
+check('labels: strip swatches retain background/text role tooltips', pluginSrc.includes('`#1 · background · ${s.hex}`') && pluginSrc.includes('`#2 · text · ${s.hex}`'))
 check('labels: slot tooltips explain their role', pluginSrc.includes('background seed') && pluginSrc.includes('text seed'))
 
 // ── Sleek naming: no auto 'Forge · ' branding ───────────────────────────

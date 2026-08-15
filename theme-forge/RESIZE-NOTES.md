@@ -20,15 +20,17 @@ Rules this pane follows:
 ## What resizes fluidly
 
 - Pane zone: `width: 280px` default, `minWidth: 220px`, `maxWidth: 520px`
-  (CSS STRINGS — the PaneSizing contract rejects bare numbers).
+  (CSS STRINGS — the PaneSizing contract rejects bare numbers). The v2 panel
+  docks explicitly at `workspace → right`, which gives Forge its own split zone
+  and sash rather than joining the generic right-side tab group.
 - Card header row: `flex-wrap`, so at narrow widths the icon-button cluster
   wraps to a second line instead of clipping the name.
 - Theme name: `min-w-0 truncate` — long names ellipsize, never push buttons out.
-- Swatch tray + strip-view swatches: `overflow-x-auto` horizontal scroll with a
-  fade hint; wheel-scroll is translated to horizontal scroll.
+- Swatch tray + strip palette: responsive wrapping grids. They keep 36px card
+  swatches tappable and add rows instead of producing a sideways control rail.
 - Theme list: `ScrollArea` with `min-h-0 flex-1` — vertical scroll, never clips.
-- Terminal preview: `overflow-x-auto` — long mono lines scroll instead of
-  hard-clipping.
+- Terminal preview: `overflow-x-auto` — the single intentional horizontal
+  scroll surface, preserving long monospace lines without clipping.
 - Drop zone / header / segmented controls: `min-w-0`, wrap when needed.
 
 ## Intentional non-fluid cases (graceful degradation)
@@ -37,8 +39,8 @@ Rules this pane follows:
    plumbing for pointer math (radius from live rect); not worth the complexity
    for a 220–520px pane. Instead the wheel+controls container is `flex-wrap`:
    below ~260px content width the controls column wraps UNDER the wheel.
-2. **Swatch slots = fixed 36px.** They scroll horizontally; never shrink.
-   Shrinking below ~28px makes them untappable.
+2. **Swatch slots = fixed 36px.** They wrap into additional rows instead of
+   shrinking or scrolling sideways. Shrinking below ~28px makes them untappable.
 3. **Segmented controls** keep their natural width; at extreme narrow widths
    the header row wraps rather than compressing the controls.
 

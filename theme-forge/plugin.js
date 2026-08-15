@@ -792,22 +792,10 @@ function forgeEscapeHatch() {
   })
 }
 
-function StripRow({ entry, onOpen, active }) {
+function StripRow({ entry, onEdit, active }) {
   const theme = entry.theme || {}
-  const t = theme.darkTerminal || theme.terminal || {}
   const colors = theme.darkColors || theme.colors || {}
   const swatches = entry.swatches && entry.swatches.length ? entry.swatches : deriveSwatches(theme)
-
-  const handleClick = ev => {
-    if (ev.target.closest('button')) return
-    onOpen?.()
-  }
-
-  const handleApply = ev => {
-    ev.stopPropagation()
-    applyTheme(entry)
-  }
-
   const label = entry.label || theme.label || entry.name
   const thumb = entry.source
     ? jsx('img', { src: entry.source, alt: '', className: 'h-5 w-5 shrink-0 rounded-[2px] object-cover' })
@@ -816,87 +804,51 @@ function StripRow({ entry, onOpen, active }) {
         style: { background: `linear-gradient(135deg, ${colors.background || '#222'} 0%, ${colors.primary || '#666'} 100%)` }
       })
 
-  return jsxs('button', {
-    type: 'button',
-    onClick: handleClick,
-    className: cn(
-      'flex w-full items-center gap-2 rounded-none px-1.5 py-1 text-left',
-      'hover:bg-(--chrome-action-hover) active:bg-(--chrome-active-hover)'
-    ),
+  // The whole row is the fast, obvious apply target. Edit stays a separate
+  // sibling button, so the strip has valid interactive markup and its intent
+  // is never hidden behind an icon-only affordance.
+  return jsxs('div', {
+    className: 'flex min-w-0 items-center gap-1 px-1.5 py-1',
     children: [
-      jsx(forgeActiveDot, { active }),
-      thumb,
-      jsx('div', {
-        className: 'min-w-0 flex-1 truncate text-[0.6875rem] text-(--ui-text-tertiary)',
-        title: label,
-        children: label
+      jsxs('button', {
+        type: 'button',
+        onClick: () => applyTheme(entry),
+        title: active ? `“${label}” is applied` : `Apply “${label}”`,
+        'aria-label': active ? `“${label}” is applied` : `Apply “${label}”`,
+        'aria-pressed': active,
+        className: cn(
+          'flex min-w-0 flex-1 items-center gap-2 rounded-[4px] px-1.5 py-1 text-left',
+          'hover:bg-(--chrome-action-hover) active:bg-(--chrome-active-hover)'
+        ),
+        style: active ? { background: 'var(--chrome-active-hover)' } : undefined,
+        children: [
+          jsx(forgeActiveDot, { active }),
+          thumb,
+          jsx('div', {
+            className: 'min-w-0 flex-1 truncate text-[0.6875rem] text-(--ui-text-tertiary)',
+            title: label,
+            children: label
+          }),
+          jsx('div', {
+            className: 'grid shrink-0 gap-0.5',
+            style: { gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', width: 62 },
+            'aria-hidden': true,
+            children: swatches.slice(0, 8).map((s, i) => jsx('span', {
+              className: 'h-3.5 w-3.5 justify-self-center rounded-[2px]',
+              style: { background: s.hex },
+              title: i === 0 ? `#1 · background · ${s.hex}` : i === 1 ? `#2 · text · ${s.hex}` : `#${i + 1} · ${s.hex}`
+            }, `s-${i}`))
+          })
+        ]
       }),
-      jsxs('div', { className: 'flex shrink-0 items-center gap-1', children: [
-        jsx('div', {
-          ref: el => {
-            if (!el) return
-            const inner = el.firstElementChild
-            if (!inner) return
-            const hint = el._scrollHint
-            const overflow = inner.scrollWidth > el.clientWidth + 1
-            if (!overflow && hint) { hint.style.opacity = '0'; hint.removeAttribute('aria-hidden') }
-            else if (overflow && !hint) {
-              const node = document.createElement('span')
-              node.setAttribute('aria-hidden', 'true')
-              node.style.cssText = 'position:absolute;right:0;top:0;bottom:0;width:14px;pointer-events:none;background:linear-gradient(to right, transparent, var(--chrome-action-hover));'
-              el.appendChild(node)
-              el._scrollHint = node
-            }
-          },
-          onWheel: ev => {
-            const el = ev.currentTarget
-            if (Math.abs(ev.deltaY) > Math.abs(ev.deltaX)) {
-              ev.preventDefault()
-              el.scrollLeft += ev.deltaY
-            }
-          },
-          className: 'relative flex overflow-x-auto overflow-y-visible',
-          style: { scrollbarWidth: 'none', scrollSnapType: 'x proximity' },
-          children: [
-            ...swatches.slice(0, 8).map((s, i) =>
-              jsxs(
-                'span',
-                {
-                  className: 'flex shrink-0 flex-col items-center',
-                  style: { scrollSnapAlign: 'start', gap: 1 },
-                  children: [
-                    jsx('span', {
-                      className: 'h-3.5 w-3.5 rounded-[2px]',
-                      style: { background: s.hex },
-                      title:
-                        i === 0
-                          ? `#1 · bkgnd · ${s.hex}`
-                          : i === 1
-                            ? `#2 · text · ${s.hex}`
-                            : `#${i + 1} · ${s.hex}`,
-                      'aria-hidden': true
-                    }),
-                    jsx('span', {
-                      className: 'text-[0.5rem] leading-none text-(--ui-text-quaternary)',
-                      style: { height: 7 },
-                      'aria-hidden': true,
-                      children: i === 0 ? 'bkgnd' : i === 1 ? 'text' : ''
-                    })
-                  ]
-                },
-                `s-${i}`
-              )
-            ),
-            jsx(Button, {
-              variant: 'ghost',
-              size: 'icon-xs',
-              title: 'Apply theme',
-              onClick: handleApply,
-              children: jsx(icons.Palette, { className: 'size-3.5' })
-            })
-          ]
-        })
-      ] })
+      jsx(Button, {
+        variant: 'ghost',
+        size: 'icon-xs',
+        title: `Edit “${label}”`,
+        'aria-label': `Edit “${label}”`,
+        onClick: onEdit,
+        children: jsx(icons.Pencil, { className: 'size-3.5' })
+      })
     ]
   })
 }
@@ -939,7 +891,9 @@ function TermPreview({ theme, mode }) {
     )
 
   return jsx('div', {
-    className: 'overflow-x-auto rounded-[6px] p-2 font-mono text-[0.6875rem] leading-relaxed',
+    // Long monospace lines are intentionally scrollable here. `min-w-0` keeps
+    // that overflow contained to the preview instead of widening the card/grid.
+    className: 'w-full min-w-0 overflow-x-auto rounded-[6px] p-2 font-mono text-[0.6875rem] leading-relaxed',
     style: { background: bg, color: fg, boxShadow: 'inset 0 0 0 1px rgba(128,128,128,0.25)' },
     children: [
       line([['➜ ', t.green], ['~/farmfriend ', t.cyan], ['git status', fg]], 'l1'),
@@ -1014,42 +968,21 @@ function SwatchTray({ entry }) {
           : 'swatch 1 = background hue · swatch 2 = text · tap to pick up, double-click to edit'
       }),
       jsx('div', {
-        ref: el => {
-          if (!el) return
-          const inner = el.firstElementChild
-          if (!inner) return
-          const hint = el._scrollHint
-          const overflow = inner.scrollWidth > el.clientWidth + 1
-          if (!overflow && hint) { hint.style.opacity = '0'; hint.removeAttribute('aria-hidden') }
-          else if (overflow && !hint) {
-            const node = document.createElement('span')
-            node.setAttribute('aria-hidden', 'true')
-            node.style.cssText = 'position:absolute;right:0;top:0;bottom:0;width:18px;pointer-events:none;background:linear-gradient(to right, transparent, var(--chrome-action-hover));'
-            el.appendChild(node)
-            el._scrollHint = node
-          }
-        },
-        onWheel: ev => {
-          const el = ev.currentTarget
-          if (Math.abs(ev.deltaY) > Math.abs(ev.deltaX)) {
-            ev.preventDefault()
-            el.scrollLeft += ev.deltaY
-          }
-        },
-        className: 'relative flex gap-1.5 overflow-x-auto overflow-y-visible',
-        style: { scrollbarWidth: 'none', scrollSnapType: 'x proximity' },
+        // Swatches remain comfortably tappable but wrap into additional rows as
+        // the pane narrows. The primary editor must never steal a vertical
+        // scroll gesture to pan sideways.
+        className: 'grid w-full gap-1.5',
+        style: { gridTemplateColumns: 'repeat(auto-fit, minmax(36px, 1fr))' },
         children: swatches.map((s, i) =>
           jsxs(
             'div',
             {
-              className: 'flex shrink-0 flex-col items-center gap-0.5',
-              style: { scrollSnapAlign: 'start' },
+              className: 'flex min-w-0 flex-col items-center gap-0.5',
               children: [
                 jsx(
-                  'div',
+                  'button',
                   {
-                    role: 'button',
-                    tabIndex: 0,
+                    type: 'button',
                     draggable: true,
                     title:
                       i === 0
@@ -1057,14 +990,14 @@ function SwatchTray({ entry }) {
                         : i === 1
                           ? `#2 · text seed · ${s.hex}`
                           : `#${i + 1} · ${s.hex}`,
+                    'aria-label':
+                      i === 0
+                        ? `Swatch 1, background seed, ${s.hex}`
+                        : i === 1
+                          ? `Swatch 2, text seed, ${s.hex}`
+                          : `Swatch ${i + 1}, ${s.hex}`,
                     onClick: () => place(i),
                     onDoubleClick: () => openWheel(i),
-                    onKeyDown: ev => {
-                      if (ev.key === 'Enter' || ev.key === ' ') {
-                        ev.preventDefault()
-                        place(i)
-                      }
-                    },
                     onDragStart: ev => {
                       dragIdx.current = i
                       ev.dataTransfer.effectAllowed = 'move'
@@ -1087,12 +1020,11 @@ function SwatchTray({ entry }) {
                       dragIdx.current = null
                       setOver(null)
                     },
-                    className: 'flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-[5px] text-xs font-bold',
+                    className: 'flex h-9 w-9 cursor-pointer items-center justify-center rounded-[5px] text-xs font-bold',
                     style: {
                       background: s.hex,
                       color: readableOn(s.hex),
-                      // ring/scale inline: arbitrary shadow-[…] and scale-* are not
-                      // in the app's frozen build CSS
+                      justifySelf: 'center',
                       boxShadow:
                         'inset 0 0 0 1px rgba(128,128,128,0.45)' +
                         (pickedHere === i || over === i ? ', 0 0 0 2px var(--ui-accent)' : ''),
@@ -1103,9 +1035,6 @@ function SwatchTray({ entry }) {
                   },
                   `sw-${i}`
                 ),
-                // Role captions: slot 1 seeds the background, slot 2 seeds the
-                // text color (UI + terminal). Fixed-height slot keeps the row
-                // aligned where no caption applies.
                 jsx('div', {
                   className: 'h-3 text-center text-[0.5625rem] leading-none text-(--ui-text-quaternary)',
                   'aria-hidden': true,
@@ -1386,7 +1315,9 @@ function ThemeCard({ entry, active }) {
   }
 
   return jsxs('div', {
-    className: 'flex flex-col gap-1.5 rounded-[6px] p-2',
+    // Grid items default to min-content sizing. These constraints let a card
+    // follow its pane's sash at every width instead of widening the ScrollArea.
+    className: 'flex min-w-0 w-full h-full flex-col gap-1.5 rounded-[6px] p-2',
     style: { boxShadow: 'inset 0 0 0 1px var(--ui-stroke-secondary)' },
     children: [
       // header row
@@ -1418,7 +1349,7 @@ function ThemeCard({ entry, active }) {
                   children: entry.label
                 })
               ] }),
-          jsxs('div', { className: 'flex shrink-0 items-center gap-0.5', children: [
+          jsxs('div', { className: 'flex min-w-0 max-w-full shrink-0 flex-wrap items-center gap-0.5', children: [
             jsx(Button, { variant: 'ghost', size: 'icon-xs', title: 'Rename theme', onClick: () => $editing.set(entry.name), children: jsx(icons.Pencil, {}) }),
             jsx(Button, { variant: 'ghost', size: 'icon-xs', title: expanded ? 'Hide terminal preview' : 'Terminal preview', onClick: () => $expanded.set(expanded ? null : entry.name), children: jsx(icons.Terminal, {}) }),
             jsx(Button, { variant: 'ghost', size: 'icon-xs', title: 'Reforge from source image', onClick: () => reforge(entry), children: jsx(icons.RefreshCw, {}) }),
@@ -1440,11 +1371,8 @@ function ThemeCard({ entry, active }) {
       jsx(Button, {
         variant: 'secondary',
         size: 'xs',
-        onClick: () => {
-          host.navigate('/settings?tab=config:appearance')
-          host.notify({ kind: 'info', message: `Click "${entry.label}" in the grid to apply.` })
-        },
-        children: 'Apply…'
+        onClick: () => applyTheme(entry),
+        children: active ? 'Applied' : 'Apply'
       }),
 
       expanded ? jsx(TermPreview, { theme: entry.theme, mode: entry.mode || mode }) : null
@@ -1487,7 +1415,7 @@ function ForgePane() {
   return jsxs('div', {
     'data-forge-pane': 'true',
     tabIndex: 0,
-    className: 'flex h-full flex-col gap-3 overflow-hidden p-3 text-sm outline-none',
+    className: 'flex min-w-0 h-full flex-col gap-3 overflow-hidden p-3 text-sm outline-none',
     onDragOver: ev => ev.preventDefault(),
     onDrop,
     children: [
@@ -1543,13 +1471,14 @@ function ForgePane() {
             children: `Forged themes (${generated.length})`
           }),
           jsx(ScrollArea, {
-            className: 'min-h-0 flex-1',
+            className: 'min-h-0 min-w-0 flex-1',
             children: jsx('div', {
-              className: viewMode === 'strip' ? 'flex min-w-0 flex-col gap-px' : 'flex min-w-0 flex-col gap-2 pb-2',
+              className: viewMode === 'strip' ? 'flex w-full min-w-0 flex-col gap-px' : 'grid w-full min-w-0 gap-2 pb-2',
+              style: viewMode === 'cards' ? { gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))' } : undefined,
               children: list.length
                 ? list.map(entry =>
                     viewMode === 'strip'
-                      ? jsx(StripRow, { entry, active: entry.name === activeSkin, onOpen: () => openCard(entry) })
+                      ? jsx(StripRow, { entry, active: entry.name === activeSkin, onEdit: () => openCard(entry) })
                       : jsx(ThemeCard, { entry, active: entry.name === activeSkin }, entry.name)
                   )
                 : jsx('div', { className: 'py-2 text-xs text-(--ui-text-tertiary)', children: 'None yet — forge one above.' })
@@ -1638,11 +1567,20 @@ export default {
 
     $viewMode.set(normalizeViewMode(ctx.storage.get($viewModeKey, 'cards')))
 
+    // This v2 contribution id deliberately migrates Forge out of any persisted
+    // generic-right tab stack. Docking on the workspace edge gives Forge its
+    // own zone and sash, so the width the user drags belongs to Forge alone.
     ctx.register({
-      id: 'pane',
+      id: 'panel-v2',
       area: 'panes',
       title: 'theme forge',
-      data: { placement: 'right', width: '280px', minWidth: '220px', maxWidth: '520px' },
+      data: {
+        placement: 'right',
+        dock: { pane: 'workspace', pos: 'right' },
+        width: '280px',
+        minWidth: '220px',
+        maxWidth: '520px'
+      },
       render: () => jsx(ForgePane, {})
     })
 
