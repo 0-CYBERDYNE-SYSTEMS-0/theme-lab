@@ -63,3 +63,17 @@ regression-fixed in commit 5404738).
   fields through to the host.
 - Placed chromatic background/text colors remain verbatim. Only neutral,
   genuinely unreadable text seeds enter the narrow contrast tripwire.
+
+## Ingest and preview safety
+
+- New image identities use `forge-<slug>-<base36 timestamp>-<short suffix>`;
+  filenames are labels, not primary keys, so repeated filenames create new
+  entries instead of replacing prior themes.
+- A second image cannot start while one is forging; this prevents concurrent
+  same-identity completion races. Reforge remains the explicit in-place update
+  action for an existing theme.
+- New entries retain a compact 128px source thumbnail for reforge and a separate
+  512px JPEG preview for the thumbnail-click dialog. Legacy entries fall back to
+  their existing source thumbnail.
+- Card and strip thumbnails are independent preview buttons; Apply remains a
+  separate action in Strip mode. Preview closes by backdrop, Escape, or Close.

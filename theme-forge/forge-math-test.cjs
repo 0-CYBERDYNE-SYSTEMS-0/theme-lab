@@ -16,6 +16,11 @@ let core = src.slice(start, end)
 const api = new Function(core + '; return {rgbToHex, hexToRgb, rgbToHsl, hslToRgb, hexToHsl, hslToHex, buildColorsFromPalette, ansiPalette, synthesize, deriveSwatches, contrast, luminance, mix, readableOn, ensureContrast, stripForgePrefix}')()
 const { rgbToHex, hexToRgb, rgbToHsl, hslToRgb, hexToHsl, hslToHex, buildColorsFromPalette, ansiPalette, synthesize, deriveSwatches, contrast, luminance, mix, readableOn, ensureContrast, stripForgePrefix } = api
 
+const nameStart = src.indexOf('const slugify =')
+const nameEnd = src.indexOf('// ── persistence + registration')
+const names = new Function(src.slice(nameStart, nameEnd) + '; return { forgeIdentity }')()
+const { forgeIdentity } = names
+
 // Simulate palette output of extractPalette for our test image blocks
 const mk = (r, g, b, w) => ({ hex: rgbToHex(r, g, b), hsl: rgbToHsl(r, g, b), weight: w })
 const palette = [
@@ -308,6 +313,17 @@ check('naming: forgeTheme no longer injects prefix', !pluginSrc.includes('label:
 check('naming: rename commit no longer re-adds prefix', !pluginSrc.includes('const label = `Forge · ${clean}`'))
 check('naming: rename draft seeded via stripForgePrefix', pluginSrc.includes('setDraft(stripForgePrefix(entry.label))'))
 check('naming: v3 migration normalizes persisted labels', pluginSrc.includes('stripForgePrefix(base.label ?? base.theme.label)'))
+
+// ── Non-destructive ingest / preview contracts ─────────────────────────────
+check('ingest: identity includes readable slug + timestamp + suffix', /^forge-sunset-[a-z0-9]+-[a-z0-9]{4,8}$/.test(forgeIdentity('Sunset', [], 123456789, 'abcd12')), forgeIdentity('Sunset', [], 123456789, 'abcd12'))
+const sameBase = forgeIdentity('Sunset', [{ name: 'forge-sunset-21i3v9-abcd12' }], 123456789, 'abcd12')
+check('ingest: collision gets a distinct suffix', sameBase !== 'forge-sunset-21i3v9-abcd12' && sameBase.startsWith('forge-sunset-'), sameBase)
+check('ingest: source uses unique identity, not bare slug', pluginSrc.includes('forgeIdentity(baseName, existing)'))
+check('ingest: same-name processing is guarded while busy', pluginSrc.includes("if ($busy.get())") && pluginSrc.includes('Already forging an image'))
+check('preview: card thumbnail opens preview', pluginSrc.includes('onClick: () => openForgePreview(entry)'))
+check('preview: strip thumbnail is a separate preview target', pluginSrc.includes('title: `Preview “${label}”`') && pluginSrc.includes('onClick: () => openForgePreview(entry)'))
+check('preview: dialog has escape and backdrop close', pluginSrc.includes("role: 'dialog'") && pluginSrc.includes("ev.key === 'Escape'") && pluginSrc.includes('onClick: onClose'))
+check('preview: larger preview source is persisted with thumbnail fallback', pluginSrc.includes('preview: previewOf(img)') && pluginSrc.includes('entry.preview || entry.source'))
 
 // ── Standard color picker parts (swatches: sliders + cells + eyedropper) ────
 check('picker: H slider present', pluginSrc.includes("label: 'H'") && pluginSrc.includes("display: `${hueDeg}°`"))

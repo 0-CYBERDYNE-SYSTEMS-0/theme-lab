@@ -56,6 +56,15 @@ function normalizeViewMode(v) {
 }
 
 const $wheelOpen = atom(null) // { slug, index } — single inline color editor
+const $forgePreview = atom(null) // entry currently shown in the image preview dialog
+
+function openForgePreview(entry) {
+  $forgePreview.set(entry)
+}
+
+function closeForgePreview() {
+  $forgePreview.set(null)
+}
 
 // ── active-skin detection ──────────────────────────────────────────────────
 // The app paints the active theme's slug onto <html data-hermes-theme="…">
@@ -326,6 +335,31 @@ const slugify = s =>
     .replace(/^-+|-+$/g, '')
     .slice(0, 40) || 'forged'
 
+const forgeRandomSuffix = () => {
+  try {
+    const uuid = globalThis.crypto?.randomUUID?.()
+    if (uuid) return uuid.replace(/-/g, '').slice(0, 6)
+    const bytes = new Uint8Array(4)
+    globalThis.crypto?.getRandomValues?.(bytes)
+    if (bytes.some(Boolean)) return Array.from(bytes, n => n.toString(16).padStart(2, '0')).join('')
+  } catch {
+    // Fall through to the non-cryptographic fallback.
+  }
+  return Math.random().toString(36).slice(2, 8).padEnd(4, '0')
+}
+
+// Human-readable, collision-resistant identity. Existing themes are never
+// replaced merely because another image has the same filename.
+const forgeIdentity = (baseName, existing = [], stamp = Date.now(), suffix = forgeRandomSuffix()) => {
+  const taken = new Set(existing.map(entry => entry?.name).filter(Boolean))
+  const root = `forge-${slugify(baseName)}`
+  const stampPart = Number(stamp).toString(36)
+  let candidate = `${root}-${stampPart}-${suffix}`
+  let n = 2
+  while (taken.has(candidate)) candidate = `${root}-${stampPart}-${suffix}-${n++}`
+  return candidate
+}
+
 function ansiPalette(ordered, bg, fgSeed) {
   const bgL = luminance(bg)
   const darkBg = bgL < 0.5
@@ -551,30 +585,36 @@ async function loadImageFromUrl(url) {
   })
 }
 
-/** Downscale to a small JPEG data-URL so sources survive restarts cheaply. */
-function thumbOf(imgEl) {
+/** Downscale to compact JPEG data-URLs so sources survive restarts cheaply. */
+function imageDataUrl(imgEl, side, quality) {
   const w = imgEl.naturalWidth || imgEl.width
   const h = imgEl.naturalHeight || imgEl.height
-  const side = 128
   const s = Math.min(1, side / Math.max(w, h))
   const canvas = document.createElement('canvas')
   canvas.width = Math.max(1, Math.round(w * s))
   canvas.height = Math.max(1, Math.round(h * s))
   const g = canvas.getContext('2d')
   g.drawImage(imgEl, 0, 0, canvas.width, canvas.height)
-  return canvas.toDataURL('image/jpeg', 0.75)
+  return canvas.toDataURL('image/jpeg', quality)
 }
 
-async function forgeTheme(file, mode) {
+function thumbOf(imgEl) {
+  return imageDataUrl(imgEl, 128, 0.75)
+}
+
+function previewOf(imgEl) {
+  return imageDataUrl(imgEl, 512, 0.82)
+}
+
+async function forgeTheme(file, mode, existing) {
   const url = URL.createObjectURL(file)
   try {
     const img = await loadImageFromUrl(url)
     const palette = extractPalette(img, MAX_SWATCHES)
     const baseName = file.name.replace(/\.[a-z0-9]+$/i, '')
-    const slug = slugify(baseName)
     const label = baseName.length > 24 ? baseName.slice(0, 24) + '…' : baseName
     const ordered = [...palette].sort((a, b) => b.weight - a.weight).slice(0, MAX_SWATCHES)
-    const themeName = `forge-${slug}`
+    const themeName = forgeIdentity(baseName, existing)
 
     return {
       name: themeName,
@@ -583,6 +623,7 @@ async function forgeTheme(file, mode) {
       swatches: ordered,
       theme: synthesize(ordered, { name: themeName, label, mode }),
       source: thumbOf(img),
+      preview: previewOf(img),
       forgedAt: Date.now()
     }
   } finally {
@@ -595,8 +636,13 @@ function handleFile(file) {
     host.notify({ kind: 'warning', message: 'That file is not an image.' })
     return
   }
+  if ($busy.get()) {
+    host.notify({ kind: 'warning', message: 'Already forging an image — wait for it to finish.' })
+    return
+  }
   $busy.set(true)
-  forgeTheme(file, $mode.get())
+  const existing = storageRef ? storageRef.get('themes', []) : []
+  forgeTheme(file, $mode.get(), existing)
     .then(entry => {
       const list = (storageRef ? storageRef.get('themes', []) : []).filter(t => t.name !== entry.name)
       list.unshift(entry)
@@ -820,22 +866,15 @@ function forgeEscapeHatch() {
 
 function StripRow({ entry, onEdit, active }) {
   const theme = entry.theme || {}
-  const colors = theme.darkColors || theme.colors || {}
   const swatches = entry.swatches && entry.swatches.length ? entry.swatches : deriveSwatches(theme)
   const label = entry.label || theme.label || entry.name
-  const thumb = entry.source
-    ? jsx('img', { src: entry.source, alt: '', className: 'h-5 w-5 shrink-0 rounded-[2px] object-cover' })
-    : jsx('div', {
-        className: 'h-5 w-5 shrink-0 rounded-[2px]',
-        style: { background: `linear-gradient(135deg, ${colors.background || '#222'} 0%, ${colors.primary || '#666'} 100%)` }
-      })
 
-  // The whole row is the fast, obvious apply target. Edit stays a separate
-  // sibling button, so the strip has valid interactive markup and its intent
-  // is never hidden behind an icon-only affordance.
+  // Keep thumbnail preview separate from Apply so a click on the image never
+  // changes the active theme accidentally.
   return jsxs('div', {
     className: 'flex min-w-0 items-center gap-1 px-1.5 py-1',
     children: [
+      jsx(ThemeThumb, { entry }),
       jsxs('button', {
         type: 'button',
         onClick: () => applyTheme(entry),
@@ -849,7 +888,6 @@ function StripRow({ entry, onEdit, active }) {
         style: active ? { background: 'var(--chrome-active-hover)' } : undefined,
         children: [
           jsx(forgeActiveDot, { active }),
-          thumb,
           jsx('div', {
             className: 'min-w-0 flex-1 truncate text-[0.6875rem] text-(--ui-text-tertiary)',
             title: label,
@@ -884,21 +922,67 @@ function StripRow({ entry, onEdit, active }) {
 /** Card thumbnail: the kept source image, or a color field built from the
  *  theme's own tokens for v1-era entries (no source persisted). */
 function ThemeThumb({ entry }) {
-  if (entry.source) {
-    return jsx('img', { src: entry.source, alt: '', className: 'h-5 w-5 shrink-0 rounded-[2px] object-cover' })
-  }
+  const label = entry.label || entry.name
   const c = entry.theme?.darkColors || entry.theme?.colors || {}
   const t = entry.theme?.darkTerminal || entry.theme?.terminal || {}
   const bg = c.background || '#222222'
   const p1 = c.primary || '#888888'
   const p2 = t.cyan || t.green || p1
-  return jsx('div', {
-    className: 'h-5 w-5 shrink-0 rounded-[3px]',
-    title: 'Theme colors (no source image kept)',
-    style: {
-      background: `linear-gradient(135deg, ${bg} 0%, ${bg} 40%, ${p1} 40%, ${p1} 70%, ${p2} 70%)`,
-      boxShadow: 'inset 0 0 0 1px rgba(128,128,128,0.35)'
+  const preview = entry.source
+    ? jsx('img', { src: entry.source, alt: '', className: 'h-full w-full rounded-[3px] object-cover' })
+    : jsx('div', {
+        className: 'h-full w-full rounded-[3px]',
+        style: {
+          background: `linear-gradient(135deg, ${bg} 0%, ${bg} 40%, ${p1} 40%, ${p1} 70%, ${p2} 70%)`,
+          boxShadow: 'inset 0 0 0 1px rgba(128,128,128,0.35)'
+        }
+      })
+  return jsx('button', {
+    type: 'button',
+    className: 'h-5 w-5 shrink-0 cursor-pointer rounded-[3px] p-0',
+    title: `Preview “${label}”`,
+    'aria-label': `Preview “${label}”`,
+    onClick: () => openForgePreview(entry),
+    children: preview
+  })
+}
+
+function ForgePreviewDialog({ entry, onClose }) {
+  const src = entry.preview || entry.source
+  useEffect(() => {
+    const onKeyDown = ev => {
+      if (ev.key === 'Escape') onClose()
     }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
+
+  return jsxs('div', {
+    role: 'dialog',
+    'aria-modal': true,
+    'aria-label': `Preview “${entry.label || entry.name}”`,
+    onClick: onClose,
+    className: 'fixed inset-0 z-50 flex items-center justify-center p-4',
+    style: { background: 'rgba(0,0,0,0.78)' },
+    children: [
+      jsxs('div', {
+        className: 'relative flex max-h-full max-w-full flex-col items-center gap-2 rounded-[6px] p-2',
+        style: { background: 'var(--ui-base)', boxShadow: '0 12px 40px rgba(0,0,0,0.45)' },
+        onClick: ev => ev.stopPropagation(),
+        children: [
+          jsx('div', { className: 'max-w-full truncate px-8 text-xs text-(--ui-text-primary)', children: entry.label || entry.name }),
+          src
+            ? jsx('img', {
+                src,
+                alt: entry.label || entry.name,
+                className: 'max-h-[80vh] max-w-[90vw] rounded-[4px] object-contain',
+                style: { imageRendering: 'auto' }
+              })
+            : jsx('div', { className: 'p-6 text-xs text-(--ui-text-secondary)', children: 'No source image retained.' }),
+          jsx(Button, { variant: 'secondary', size: 'xs', onClick: onClose, children: 'Close' })
+        ]
+      })
+    ]
   })
 }
 
@@ -1402,6 +1486,7 @@ function ForgePane() {
   const mode = useValue($mode)
   const viewMode = useValue($viewMode)
   const activeSkin = forgeUseActiveSkin()
+  const preview = useValue($forgePreview)
 
   // Pin the currently-applied theme to the top so it's always visible for
   // quick customization; the indicator dot marks it. Rest keeps its order.
@@ -1501,7 +1586,8 @@ function ForgePane() {
             })
           })
         ]
-      })
+      }),
+      preview ? jsx(ForgePreviewDialog, { entry: preview, onClose: closeForgePreview }) : null
     ]
   })
 }
