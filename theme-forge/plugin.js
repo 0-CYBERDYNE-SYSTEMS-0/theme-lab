@@ -1090,14 +1090,21 @@ function SwatchTray({ entry }) {
               className: 'flex min-w-0 flex-col items-center gap-0.5',
               children: [
                 jsx(
-                  'button',
+                  'div',
                   {
-                    type: 'button',
+                    role: 'button',
+                    tabIndex: 0,
                     draggable: true,
                     title: `#${i + 1} · ${swatchRole(i)} · ${s.hex}`,
                     'aria-label': `Swatch ${i + 1}, ${swatchRole(i)}, ${s.hex}`,
                     onClick: () => place(i),
                     onDoubleClick: () => openWheel(i),
+                    onKeyDown: ev => {
+                      if (ev.key === 'Enter' || ev.key === ' ') {
+                        ev.preventDefault()
+                        place(i)
+                      }
+                    },
                     onDragStart: ev => {
                       dragIdx.current = i
                       ev.dataTransfer.effectAllowed = 'move'
